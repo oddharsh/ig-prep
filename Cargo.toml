@@ -1,0 +1,11 @@
+[package]
+name = "ig-prep"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+exif-sooc = { version = "0.1.0", path = "../exif-sooc" }
+fast_image_resize = "6"
+jpeg-encoder = "0.6"
+png = "0.17"
+zune-jpeg = "0.4"
