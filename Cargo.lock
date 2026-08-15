@@ -47,6 +47,7 @@ dependencies = [
 [[package]]
 name = "exif-sooc"
 version = "0.1.0"
+source = "git+https://github.com/oddharsh/exif-sooc#4d314cf09b109658c1bdb18be726b6fe630e2749"
 
 [[package]]
 name = "fast_image_resize"
