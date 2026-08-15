@@ -152,9 +152,32 @@ fn one(path: &Path, o: &Opts) -> String {
         .and_then(|p| p.get("Orientation").and_then(|t| t.value.as_i64()))
         .unwrap_or(1) as u16;
 
-    let img = match decode::open(path) {
-        Ok(i) => i.oriented(orientation),
+    let decoded = match decode::open(path) {
+        Ok(d) => d,
         Err(e) => return format!("{name}: {e}"),
+    };
+
+    // Trust the measurement over the flag where the measurement can tell.
+    // A rotation that swaps the axes is visible in the dimensions: if the
+    // decoder handed back the DISPLAY shape rather than the stored one, it
+    // rotated, whatever this build believes about that decoder. Orientations
+    // 2, 3 and 4 are mirrors and a 180 turn, which leave the dimensions alone,
+    // so those fall back to the per-decoder flag.
+    let swaps = matches!(orientation, 5..=8);
+    let already = if swaps {
+        exif_sooc::read(path)
+            .ok()
+            .and_then(|p| p.dimensions())
+            .map(|(dw, dh)| (decoded.img.w, decoded.img.h) == (dw, dh))
+            .unwrap_or(decoded.orientation_applied)
+    } else {
+        decoded.orientation_applied
+    };
+
+    let img = if already {
+        decoded.img
+    } else {
+        decoded.img.oriented(orientation)
     };
 
     let plan = geometry::plan(img.w, img.h, o.fit, o.gravity, o.width);
@@ -185,7 +208,13 @@ fn one(path: &Path, o: &Opts) -> String {
         Err(e) => return format!("{name}: {e}"),
     };
     let final_img = if plan.canvas != plan.scale {
-        scaled.pad_onto(plan.canvas.0, plan.canvas.1, plan.offset.0, plan.offset.1, o.pad)
+        scaled.pad_onto(
+            plan.canvas.0,
+            plan.canvas.1,
+            plan.offset.0,
+            plan.offset.1,
+            o.pad,
+        )
     } else {
         scaled
     };

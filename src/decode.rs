@@ -9,21 +9,54 @@ use crate::image::Rgb;
 use std::path::Path;
 use std::process::Command;
 
-pub fn open(path: &Path) -> Result<Rgb, String> {
+/// A decoded image, and whether the decoder already applied EXIF orientation.
+///
+/// Decoders disagree about this and both answers are defensible, so the only
+/// safe thing is to know which one you got. Measured on a 7728x5152 frame with
+/// Orientation 8:
+///
+///   sips    leaves pixels stored-order and copies the tag forward, through
+///           every output format and through a resize
+///   djxl    returns 5152x7728 and writes "Horizontal (normal)", having
+///           applied the rotation itself
+///
+/// Applying orientation on top of a decoder that already did it turns a
+/// portrait into a sideways portrait, and the geometry planner then sizes it as
+/// a landscape. That is a wrong picture rather than an error, which is why this
+/// flag exists instead of an assumption.
+pub struct Decoded {
+    pub img: Rgb,
+    pub orientation_applied: bool,
+}
+
+pub fn open(path: &Path) -> Result<Decoded, String> {
     let head = read_head(path)?;
     if head.starts_with(&[0xFF, 0xD8]) {
-        return jpeg(&std::fs::read(path).map_err(|e| e.to_string())?);
+        // zune-jpeg decodes pixels and does not look at EXIF.
+        return jpeg(&std::fs::read(path).map_err(|e| e.to_string())?).map(not_applied);
     }
     if head.starts_with(&[0x89, b'P', b'N', b'G']) {
-        return png(&std::fs::read(path).map_err(|e| e.to_string())?);
+        return png(&std::fs::read(path).map_err(|e| e.to_string())?).map(not_applied);
     }
     // HEIF/HEIC/HIF, AVIF, and JPEG XL both of its signatures.
     let is_bmff = head.get(4..8) == Some(b"ftyp");
-    let is_jxl = head.starts_with(&[0xFF, 0x0A]) || head.starts_with(&[0, 0, 0, 0x0C, b'J', b'X', b'L', b' ']);
+    let is_jxl = head.starts_with(&[0xFF, 0x0A])
+        || head.starts_with(&[0, 0, 0, 0x0C, b'J', b'X', b'L', b' ']);
     if is_bmff || is_jxl {
-        return via_converter(path, is_jxl);
+        return via_converter(path, is_jxl).map(|img| Decoded {
+            img,
+            // djxl normalises; sips does not.
+            orientation_applied: is_jxl,
+        });
     }
     Err("not a JPEG, PNG, HEIF or JPEG XL".into())
+}
+
+fn not_applied(img: Rgb) -> Decoded {
+    Decoded {
+        img,
+        orientation_applied: false,
+    }
 }
 
 fn read_head(path: &Path) -> Result<Vec<u8>, String> {
@@ -37,8 +70,10 @@ fn read_head(path: &Path) -> Result<Vec<u8>, String> {
 
 fn jpeg(bytes: &[u8]) -> Result<Rgb, String> {
     let mut d = zune_jpeg::JpegDecoder::new(bytes);
-    d.set_options(zune_jpeg::zune_core::options::DecoderOptions::default()
-        .jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGB));
+    d.set_options(
+        zune_jpeg::zune_core::options::DecoderOptions::default()
+            .jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGB),
+    );
     let px = d.decode().map_err(|e| format!("jpeg: {e:?}"))?;
     let (w, h) = d.dimensions().ok_or("jpeg: no dimensions")?;
     Ok(Rgb::new(w as u32, h as u32, px))
@@ -48,7 +83,9 @@ fn png(bytes: &[u8]) -> Result<Rgb, String> {
     let dec = png::Decoder::new(bytes);
     let mut reader = dec.read_info().map_err(|e| format!("png: {e}"))?;
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|e| format!("png: {e}"))?;
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png: {e}"))?;
     let px = match info.color_type {
         png::ColorType::Rgb => buf[..info.buffer_size()].to_vec(),
         png::ColorType::Rgba => buf[..info.buffer_size()]
@@ -112,11 +149,7 @@ fn via_converter(path: &Path, is_jxl: bool) -> Result<Rgb, String> {
     }
     let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&tmp);
-    if is_jxl {
-        png(&bytes)
-    } else {
-        tiff(&bytes)
-    }
+    if is_jxl { png(&bytes) } else { tiff(&bytes) }
 }
 
 /// Just enough TIFF to read what `sips` writes: uncompressed, chunky, 8 or 16
@@ -136,7 +169,11 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
     };
     let u16at = |o: usize| -> Option<u16> {
         let b = d.get(o..o + 2)?;
-        Some(if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) })
+        Some(if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        })
     };
     let u32at = |o: usize| -> Option<u32> {
         let b = d.get(o..o + 4)?;
@@ -164,7 +201,11 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
             let width = if fmt == 3 { 2 } else { 4 };
             let inline = count * width <= 4;
             let base = if inline { e + 8 } else { val as usize };
-            if fmt == 3 { u16at(base + i * 2).map(u32::from) } else { u32at(base + i * 4) }
+            if fmt == 3 {
+                u16at(base + i * 2).map(u32::from)
+            } else {
+                u32at(base + i * 4)
+            }
         };
         match tag {
             // Strips and tiles are alternatives, and sips writes TILES: a
@@ -185,7 +226,8 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
     let compression = f.get(&0x0103).copied().unwrap_or(1);
     let samples = f.get(&0x0115).copied().unwrap_or(3) as usize;
     let planar = f.get(&0x011c).copied().unwrap_or(1);
-    if compression != 1 || !(bits == 8 || bits == 16) || planar != 1 || !(3..=4).contains(&samples) {
+    if compression != 1 || !(bits == 8 || bits == 16) || planar != 1 || !(3..=4).contains(&samples)
+    {
         return Err(format!(
             "tiff: only uncompressed 8/16-bit chunky RGB(A) is read (compression {compression}, bits {bits}, samples {samples}, planar {planar})"
         ));
@@ -242,7 +284,9 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
         if samples == 3 {
             raw
         } else {
-            raw.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2]]).collect()
+            raw.chunks_exact(4)
+                .flat_map(|c| [c[0], c[1], c[2]])
+                .collect()
         }
     } else {
         let rd = |c: &[u8]| -> u8 {

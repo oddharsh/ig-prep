@@ -95,7 +95,9 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
 
     let (cw, ch) = (crop.2, crop.3);
     let scale_w = width.min(cw);
-    let scale_h = ((scale_w as f64) / (cw as f64 / ch as f64)).round().max(1.0) as u32;
+    let scale_h = ((scale_w as f64) / (cw as f64 / ch as f64))
+        .round()
+        .max(1.0) as u32;
 
     let (canvas, offset) = if fit == Fit::Pad && outside_band {
         let want = if ratio < MIN_PORTRAIT {
@@ -106,10 +108,16 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
         if ratio < want {
             // Too tall to show: widen the canvas rather than cut the picture.
             let cw2 = ((scale_h as f64) * want).round() as u32;
-            ((cw2.max(scale_w), scale_h), ((cw2.saturating_sub(scale_w)) / 2, 0))
+            (
+                (cw2.max(scale_w), scale_h),
+                ((cw2.saturating_sub(scale_w)) / 2, 0),
+            )
         } else {
             let ch2 = ((scale_w as f64) / want).round() as u32;
-            ((scale_w, ch2.max(scale_h)), (0, (ch2.saturating_sub(scale_h)) / 2))
+            (
+                (scale_w, ch2.max(scale_h)),
+                (0, (ch2.saturating_sub(scale_h)) / 2),
+            )
         }
     } else {
         ((scale_w, scale_h), (0, 0))
