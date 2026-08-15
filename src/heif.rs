@@ -23,11 +23,6 @@ pub struct Transform {
 }
 
 impl Transform {
-    pub const NONE: Transform = Transform {
-        rotate_cw: 0,
-        mirrored: false,
-    };
-
     /// EXIF Orientation, 1 through 8.
     pub fn from_exif(v: u16) -> Option<Transform> {
         let t = |rotate_cw, mirrored| {
@@ -184,20 +179,20 @@ pub fn container_transform(file: &[u8]) -> Option<Transform> {
                 p += 1;
                 v
             };
-            if item == primary {
-                if let Some(Some(t)) = props.get(idx) {
-                    found = Some(match found {
-                        None => *t,
-                        // Two transform properties compose. Mirrors do not
-                        // commute with rotation, and the property order is the
-                        // order they are listed in, so this composes in that
-                        // order rather than sorting them.
-                        Some(a) => Transform {
-                            rotate_cw: (a.rotate_cw + t.rotate_cw) % 360,
-                            mirrored: a.mirrored ^ t.mirrored,
-                        },
-                    });
-                }
+            if item == primary
+                && let Some(Some(t)) = props.get(idx)
+            {
+                found = Some(match found {
+                    None => *t,
+                    // Two transform properties compose. Mirrors do not
+                    // commute with rotation, and the property order is the
+                    // order they are listed in, so this composes in that
+                    // order rather than sorting them.
+                    Some(a) => Transform {
+                        rotate_cw: (a.rotate_cw + t.rotate_cw) % 360,
+                        mirrored: a.mirrored ^ t.mirrored,
+                    },
+                });
             }
         }
     }
@@ -213,8 +208,9 @@ mod tests {
         // A Fujifilm HIF writes irot angle 1, which is 90 counter-clockwise,
         // and EXIF 8, which is 270 clockwise. They are the same rotation, and
         // a check that called them different would flag every file.
+        // irot angle 1 is 90 counter-clockwise, which is 270 clockwise.
         let from_irot = Transform {
-            rotate_cw: (360 - 90) % 360,
+            rotate_cw: 270,
             mirrored: false,
         };
         assert_eq!(Transform::from_exif(8), Some(from_irot));

@@ -101,11 +101,9 @@ fn main() {
     if check {
         std::process::exit(run_check(&files));
     }
-    if !dry {
-        if let Err(e) = std::fs::create_dir_all(&out_dir) {
-            eprintln!("ig-prep: {}: {e}", out_dir.display());
-            std::process::exit(1);
-        }
+    if !dry && let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("ig-prep: {}: {e}", out_dir.display());
+        std::process::exit(1);
     }
 
     let threads = std::thread::available_parallelism()

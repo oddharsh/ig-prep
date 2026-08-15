@@ -298,7 +298,9 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
             // Round rather than truncate: dropping the low byte outright
             // darkens every value by half a step, which is visible as a shift
             // across a smooth sky.
-            (((v as u32 * 255 + 32895) >> 16) as u8).min(255)
+            // The +32895 rounds to nearest; the result cannot exceed 255, so
+            // there is nothing left to clamp.
+            ((v as u32 * 255 + 32895) >> 16) as u8
         };
         raw.chunks_exact(samples * 2)
             .flat_map(|p| [rd(&p[0..2]), rd(&p[2..4]), rd(&p[4..6])])
