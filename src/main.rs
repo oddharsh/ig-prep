@@ -8,6 +8,7 @@
 mod decode;
 mod encode;
 mod geometry;
+mod heif;
 mod image;
 
 use geometry::{Fit, Gravity};
@@ -36,6 +37,8 @@ OPTIONS
     --pad-color <hex>  fill for --pad (default ffffff)
     -o, --out <dir>    output directory (default ./ig)
     -n, --dry-run      report the plan for each file, write nothing
+    --check            report files whose two rotations disagree, convert
+                       nothing. Exits non-zero if any do.
     -h, --help
 ";
 
@@ -44,6 +47,7 @@ fn main() {
     let (mut paths, mut fit, mut gravity) = (Vec::new(), Fit::Full, Gravity::Center);
     let mut width = geometry::TARGET_WIDTH;
     let (mut quality, mut subsample, mut dry) = (95u8, false, false);
+    let mut check = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
 
@@ -55,6 +59,7 @@ fn main() {
             "--pad" => fit = Fit::Pad,
             "--420" => subsample = true,
             "-n" | "--dry-run" => dry = true,
+            "--check" => check = true,
             "--gravity" => {
                 gravity = match args.next().as_deref() {
                     Some("top") => Gravity::Top,
@@ -93,6 +98,9 @@ fn main() {
         eprintln!("ig-prep: no readable images");
         std::process::exit(1);
     }
+    if check {
+        std::process::exit(run_check(&files));
+    }
     if !dry {
         if let Err(e) = std::fs::create_dir_all(&out_dir) {
             eprintln!("ig-prep: {}: {e}", out_dir.display());
@@ -128,6 +136,59 @@ fn main() {
     });
     for l in lines.into_iter().flatten() {
         println!("{l}");
+    }
+}
+
+/// Report files whose container transform and EXIF Orientation disagree.
+///
+/// Carrying BOTH is normal and is what every Fujifilm HIF does; a viewer that
+/// applies one of them is right. What cannot be recovered is the two saying
+/// DIFFERENT things, because then there is no orientation the file agrees on
+/// and every viewer is wrong in some way. Only that case is a failure here.
+fn run_check(files: &[PathBuf]) -> i32 {
+    let (mut both, mut disagree, mut one, mut neither) = (0, 0, 0, 0);
+    for path in files {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("{name}: {e}");
+                continue;
+            }
+        };
+        let exif = exif_sooc::read(path)
+            .ok()
+            .and_then(|p| p.get("Orientation").and_then(|t| t.value.as_i64()))
+            .and_then(|v| heif::Transform::from_exif(v as u16));
+        let container = heif::container_transform(&bytes);
+
+        match (exif, container) {
+            (Some(e), Some(c)) if e == c => both += 1,
+            (Some(e), Some(c)) => {
+                disagree += 1;
+                println!(
+                    "{name}: DISAGREE  container says {}, EXIF says {}",
+                    c.describe(),
+                    e.describe()
+                );
+            }
+            (Some(_), None) | (None, Some(_)) => one += 1,
+            (None, None) => neither += 1,
+        }
+    }
+    println!(
+        "\n{} files: {disagree} disagree, {both} say the same thing twice, {one} say it once, {neither} say nothing",
+        files.len()
+    );
+    if disagree > 0 {
+        println!(
+            "\nA file whose two rotations disagree has no orientation every viewer can\n\
+             agree on. Converting it here bakes ONE of them into the pixels and drops\n\
+             the tags, which at least makes the result unambiguous."
+        );
+        1
+    } else {
+        0
     }
 }
 
