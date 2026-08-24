@@ -124,7 +124,7 @@ pub fn resize(src: &Rgb, w: u32, h: u32) -> Result<Rgb, String> {
     // took a file from 2.4s to under a second.
     let table = srgb_to_linear_table();
     let mut bytes = vec![0u8; src.px.len() * 4];
-    for (chunk, &i) in bytes.chunks_exact_mut(4).zip(src.px.iter()) {
+    for (chunk, &i) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(src.px.iter()) {
         chunk.copy_from_slice(&table[i as usize].to_ne_bytes());
     }
     let src_img = Image::from_vec_u8(src.w, src.h, bytes, PixelType::F32x3)
@@ -140,7 +140,9 @@ pub fn resize(src: &Rgb, w: u32, h: u32) -> Result<Rgb, String> {
 
     let out: Vec<u8> = dst_img
         .buffer()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| linear_to_srgb(f32::from_ne_bytes([c[0], c[1], c[2], c[3]])))
         .collect();
     Ok(Rgb::new(w, h, out))

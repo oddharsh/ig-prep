@@ -99,11 +99,15 @@ fn jpeg(bytes: &[u8]) -> Result<Rgb, String> {
         ColorSpace::RGB => px,
         ColorSpace::Luma => px.iter().flat_map(|&v| [v, v, v]).collect(),
         ColorSpace::LumaA => px
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[0], c[0]])
             .collect(),
         ColorSpace::RGBA => px
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2]])
             .collect(),
         other => return Err(format!("jpeg: unsupported colourspace {other:?}")),
@@ -129,7 +133,9 @@ fn png(bytes: &[u8]) -> Result<Rgb, String> {
     let px = match info.color_type {
         png::ColorType::Rgb => buf[..info.buffer_size()].to_vec(),
         png::ColorType::Rgba => buf[..info.buffer_size()]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2]])
             .collect(),
         png::ColorType::Grayscale => buf[..info.buffer_size()]
@@ -324,7 +330,9 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
         if samples == 3 {
             raw
         } else {
-            raw.chunks_exact(4)
+            raw.as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|c| [c[0], c[1], c[2]])
                 .collect()
         }
@@ -375,7 +383,7 @@ mod tests {
         assert_eq!(img.px.len(), w * h * 3, "must be three channels");
         // Expanded rather than merely padded: a pixel is grey, so its three
         // channels agree.
-        for px in img.px.chunks_exact(3) {
+        for px in img.px.as_chunks::<3>().0.iter() {
             assert_eq!(px[0], px[1]);
             assert_eq!(px[1], px[2]);
         }
