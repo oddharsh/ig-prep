@@ -68,14 +68,54 @@ fn read_head(path: &Path) -> Result<Vec<u8>, String> {
     Ok(b)
 }
 
+/// Decode a JPEG to three channels.
+///
+/// `jpeg_set_out_colorspace` is a REQUEST rather than an instruction, and for a
+/// single-channel source zune-jpeg declines it and returns Luma anyway. That
+/// declining is silent, which is what makes it worth a comment: the buffer
+/// comes back at one byte per pixel, `Rgb::new` labels it as three, and the
+/// mismatch surfaces two layers later inside the resizer as "Size of buffer is
+/// smaller than required" — an error that names neither the file nor its
+/// colour. Every black-and-white JPEG failed that way.
+///
+/// So the colourspace the decoder actually USED is what gets expanded here,
+/// never the one it was asked for. The length check below is the backstop for
+/// the next colourspace this misses: a decoder disagreeing with its own
+/// dimensions should be caught at the decode boundary, where the file name is
+/// still in hand.
 fn jpeg(bytes: &[u8]) -> Result<Rgb, String> {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+
     let mut d = zune_jpeg::JpegDecoder::new(bytes);
     d.set_options(
         zune_jpeg::zune_core::options::DecoderOptions::default()
-            .jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGB),
+            .jpeg_set_out_colorspace(ColorSpace::RGB),
     );
     let px = d.decode().map_err(|e| format!("jpeg: {e:?}"))?;
     let (w, h) = d.dimensions().ok_or("jpeg: no dimensions")?;
+    let space = d.get_output_colorspace().ok_or("jpeg: no colourspace")?;
+
+    let px = match space {
+        ColorSpace::RGB => px,
+        ColorSpace::Luma => px.iter().flat_map(|&v| [v, v, v]).collect(),
+        ColorSpace::LumaA => px
+            .chunks_exact(2)
+            .flat_map(|c| [c[0], c[0], c[0]])
+            .collect(),
+        ColorSpace::RGBA => px
+            .chunks_exact(4)
+            .flat_map(|c| [c[0], c[1], c[2]])
+            .collect(),
+        other => return Err(format!("jpeg: unsupported colourspace {other:?}")),
+    };
+
+    let want = w * h * 3;
+    if px.len() != want {
+        return Err(format!(
+            "jpeg: decoded {} bytes for a {w}x{h} {space:?} image, expected {want}",
+            px.len()
+        ));
+    }
     Ok(Rgb::new(w as u32, h as u32, px))
 }
 
@@ -307,4 +347,60 @@ fn tiff(d: &[u8]) -> Result<Rgb, String> {
             .collect()
     };
     Ok(Rgb::new(w, h, px))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grayscale JPEG must come back as three channels.
+    ///
+    /// This is a regression rather than a nicety: `jpeg_set_out_colorspace` is
+    /// a request the decoder declines for a single-channel source, so every
+    /// black-and-white JPEG used to reach the resizer at a third of the length
+    /// its dimensions claimed and die there with an error naming neither.
+    /// Built here rather than committed as a fixture so the test carries its
+    /// own input.
+    #[test]
+    fn grayscale_jpeg_expands_to_rgb() {
+        let (w, h) = (32usize, 24usize);
+        let luma: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        let mut encoded = Vec::new();
+        jpeg_encoder::Encoder::new(&mut encoded, 90)
+            .encode(&luma, w as u16, h as u16, jpeg_encoder::ColorType::Luma)
+            .expect("encode a luma jpeg");
+
+        let img = jpeg(&encoded).expect("decode the luma jpeg");
+        assert_eq!((img.w, img.h), (w as u32, h as u32));
+        assert_eq!(img.px.len(), w * h * 3, "must be three channels");
+        // Expanded rather than merely padded: a pixel is grey, so its three
+        // channels agree.
+        for px in img.px.chunks_exact(3) {
+            assert_eq!(px[0], px[1]);
+            assert_eq!(px[1], px[2]);
+        }
+    }
+
+    /// The colour path is untouched by that expansion.
+    #[test]
+    fn colour_jpeg_still_decodes_to_rgb() {
+        let (w, h) = (32usize, 24usize);
+        let rgb: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                [
+                    (i % 256) as u8,
+                    ((i * 3) % 256) as u8,
+                    ((i * 7) % 256) as u8,
+                ]
+            })
+            .collect();
+        let mut encoded = Vec::new();
+        jpeg_encoder::Encoder::new(&mut encoded, 90)
+            .encode(&rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+            .expect("encode an rgb jpeg");
+
+        let img = jpeg(&encoded).expect("decode the rgb jpeg");
+        assert_eq!((img.w, img.h), (w as u32, h as u32));
+        assert_eq!(img.px.len(), w * h * 3);
+    }
 }
