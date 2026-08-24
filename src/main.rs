@@ -10,6 +10,7 @@ mod encode;
 mod geometry;
 mod heif;
 mod image;
+mod mcp;
 
 use encode::Chroma;
 use geometry::{Fit, Gravity};
@@ -46,9 +47,42 @@ OPTIONS
     --check            report files whose two rotations disagree, convert
                        nothing. Exits non-zero if any do.
     -h, --help
+
+MCP SERVER
+    ig-prep mcp [--root <dir>]
+                  Speak MCP on stdin and stdout, so a model with file access
+                  can convert photographs where they already are. Tools:
+                  ig_plan, ig_convert, ig_check_rotation. --root confines every
+                  path argument to one directory; without it any readable path
+                  may be converted.
 ";
 
 fn main() {
+    // `mcp` is a MODE rather than an option, and it is matched before the
+    // option loop because everything below parses arguments for a conversion
+    // this process is not going to perform.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("mcp") {
+        let mut root = None;
+        let mut rest = argv[1..].iter();
+        while let Some(a) = rest.next() {
+            match a.as_str() {
+                "--root" => match rest.next() {
+                    Some(d) => root = Some(PathBuf::from(d)),
+                    None => {
+                        eprintln!("ig-prep: --root needs a directory");
+                        std::process::exit(2);
+                    }
+                },
+                other => {
+                    eprintln!("ig-prep mcp: unknown option {other}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        std::process::exit(mcp::serve(root));
+    }
+
     let mut args = std::env::args().skip(1).peekable();
     let (mut paths, mut fit, mut gravity) = (Vec::new(), Fit::Full, Gravity::Center);
     let mut width = geometry::TARGET_WIDTH;
@@ -114,11 +148,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(files.len());
-    let chunk = files.len().div_ceil(threads);
     let opts = Opts {
         fit,
         gravity,
@@ -130,20 +159,124 @@ fn main() {
         out_dir: out_dir.clone(),
     };
 
-    let lines: Vec<Vec<String>> = std::thread::scope(|s| {
+    for r in run_all(&files, &opts) {
+        println!("{}", r.line());
+    }
+}
+
+/// Convert a batch across the available cores, in input order.
+///
+/// Shared by the CLI and the MCP server so that a conversion cannot depend on
+/// which door it came through. Order is preserved because a caller matching
+/// results against the paths it sent has no other key to match on: the report
+/// carries the source path, but a model reading the text lines reads them
+/// positionally.
+pub fn run_all(files: &[PathBuf], opts: &Opts) -> Vec<Report> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(files.len());
+    let chunk = files.len().div_ceil(threads);
+    let parts: Vec<Vec<Report>> = std::thread::scope(|s| {
         let handles: Vec<_> = files
             .chunks(chunk)
-            .map(|part| {
-                let opts = &opts;
-                s.spawn(move || part.iter().map(|p| one(p, opts)).collect::<Vec<_>>())
-            })
+            .map(|part| s.spawn(move || part.iter().map(|p| one(p, opts)).collect::<Vec<_>>()))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    for l in lines.into_iter().flatten() {
-        println!("{l}");
+    parts.into_iter().flatten().collect()
+}
+
+/// Report files whose container transform and EXIF Orientation disagree.
+///
+/// Carrying BOTH is normal and is what every Fujifilm HIF does; a viewer that
+/// applies one of them is right. What cannot be recovered is the two saying
+/// DIFFERENT things, because then there is no orientation the file agrees on
+/// and every viewer is wrong in some way. Only that case is a failure here.
+/// How a file's two statements about its own rotation line up.
+pub enum Agreement {
+    /// Container transform and EXIF Orientation, saying the same thing. What
+    /// every Fujifilm HIF does, and not a problem.
+    Both,
+    /// The two say DIFFERENT things, so no viewer can be right.
+    Disagree,
+    /// Only one of the two is present, which is unambiguous.
+    One,
+    /// Neither is present, so the pixels are already upright.
+    Neither,
+    Unreadable,
+}
+
+impl Agreement {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Agreement::Both => "both",
+            Agreement::Disagree => "disagree",
+            Agreement::One => "one",
+            Agreement::Neither => "neither",
+            Agreement::Unreadable => "unreadable",
+        }
     }
 }
+
+pub struct Check {
+    pub name: String,
+    pub source: PathBuf,
+    pub agreement: Agreement,
+    /// What each of the two says, as prose, present only when that one is.
+    pub container: Option<String>,
+    pub exif: Option<String>,
+    pub error: Option<String>,
+}
+
+pub fn check_one(path: &Path) -> Check {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Check {
+                name,
+                source: path.to_path_buf(),
+                agreement: Agreement::Unreadable,
+                container: None,
+                exif: None,
+                error: Some(e.to_string()),
+            };
+        }
+    };
+    let exif = exif_sooc::read(path)
+        .ok()
+        .and_then(|p| p.get("Orientation").and_then(|t| t.value.as_i64()))
+        .and_then(|v| heif::Transform::from_exif(v as u16));
+    let container = heif::container_transform(&bytes);
+    let agreement = match (exif, container) {
+        (Some(e), Some(c)) if e == c => Agreement::Both,
+        (Some(_), Some(_)) => Agreement::Disagree,
+        (Some(_), None) | (None, Some(_)) => Agreement::One,
+        (None, None) => Agreement::Neither,
+    };
+    Check {
+        name,
+        source: path.to_path_buf(),
+        agreement,
+        container: container.map(|c| c.describe()),
+        exif: exif.map(|e| e.describe()),
+        error: None,
+    }
+}
+
+/// The note a disagreement earns. Shared so the CLI and the MCP server explain
+/// the same finding the same way.
+pub const DISAGREE_NOTE: &str = "A file whose two rotations disagree has no orientation every viewer can \
+agree on. Converting it here bakes ONE of them into the pixels and drops the tags, which at least \
+makes the result unambiguous.";
 
 /// Report files whose container transform and EXIF Orientation disagree.
 ///
@@ -154,32 +287,21 @@ fn main() {
 fn run_check(files: &[PathBuf]) -> i32 {
     let (mut both, mut disagree, mut one, mut neither) = (0, 0, 0, 0);
     for path in files {
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                println!("{name}: {e}");
-                continue;
-            }
-        };
-        let exif = exif_sooc::read(path)
-            .ok()
-            .and_then(|p| p.get("Orientation").and_then(|t| t.value.as_i64()))
-            .and_then(|v| heif::Transform::from_exif(v as u16));
-        let container = heif::container_transform(&bytes);
-
-        match (exif, container) {
-            (Some(e), Some(c)) if e == c => both += 1,
-            (Some(e), Some(c)) => {
+        let c = check_one(path);
+        match c.agreement {
+            Agreement::Unreadable => println!("{}: {}", c.name, c.error.unwrap_or_default()),
+            Agreement::Both => both += 1,
+            Agreement::Disagree => {
                 disagree += 1;
                 println!(
-                    "{name}: DISAGREE  container says {}, EXIF says {}",
-                    c.describe(),
-                    e.describe()
+                    "{}: DISAGREE  container says {}, EXIF says {}",
+                    c.name,
+                    c.container.unwrap_or_default(),
+                    c.exif.unwrap_or_default()
                 );
             }
-            (Some(_), None) | (None, Some(_)) => one += 1,
-            (None, None) => neither += 1,
+            Agreement::One => one += 1,
+            Agreement::Neither => neither += 1,
         }
     }
     println!(
@@ -187,30 +309,113 @@ fn run_check(files: &[PathBuf]) -> i32 {
         files.len()
     );
     if disagree > 0 {
-        println!(
-            "\nA file whose two rotations disagree has no orientation every viewer can\n\
-             agree on. Converting it here bakes ONE of them into the pixels and drops\n\
-             the tags, which at least makes the result unambiguous."
-        );
+        println!("\n{DISAGREE_NOTE}");
         1
     } else {
         0
     }
 }
 
-struct Opts {
-    fit: Fit,
-    gravity: Gravity,
-    width: u32,
-    quality: u8,
-    chroma: Chroma,
-    dry: bool,
+pub struct Opts {
+    pub fit: Fit,
+    pub gravity: Gravity,
+    pub width: u32,
+    pub quality: u8,
+    pub chroma: Chroma,
+    pub dry: bool,
     pad: [u8; 3],
-    out_dir: PathBuf,
+    pub out_dir: PathBuf,
 }
 
-fn one(path: &Path, o: &Opts) -> String {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
+impl Opts {
+    /// The defaults the CLI applies, so a caller that sets nothing gets the
+    /// same conversion the bare `ig-prep <dir>` command performs.
+    pub fn defaults() -> Opts {
+        Opts {
+            fit: Fit::Full,
+            gravity: Gravity::Center,
+            width: geometry::TARGET_WIDTH,
+            quality: 95,
+            chroma: Chroma::Full,
+            dry: false,
+            pad: [255, 255, 255],
+            out_dir: PathBuf::from("ig"),
+        }
+    }
+
+    /// `--pad-color`, parsed from `ffffff` or `#ffffff`. Anything else leaves
+    /// the fill alone rather than substituting a colour nobody asked for.
+    pub fn set_pad_color(&mut self, hex: &str) {
+        let h = hex.trim_start_matches('#');
+        if h.len() == 6 {
+            for i in 0..3 {
+                self.pad[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(255);
+            }
+        }
+    }
+}
+
+/// What became of one file.
+///
+/// The CLI renders this as a line and the MCP server hands the same fields
+/// back as JSON, so the two surfaces cannot end up describing different
+/// conversions. Every field is optional in the way the failure actually is:
+/// a file that would not decode has no dimensions, and a dry run has no
+/// output path, rather than either being reported as a zero.
+pub struct Report {
+    pub name: String,
+    pub source: PathBuf,
+    /// Display dimensions, after rotation. Every later number derives from
+    /// these rather than from what the decoder happened to hand back.
+    pub from: Option<(u32, u32)>,
+    pub to: Option<(u32, u32)>,
+    /// True when the source ratio is outside what Instagram shows uncropped.
+    pub outside_band: bool,
+    pub output: Option<PathBuf>,
+    pub bytes: Option<usize>,
+    pub chroma: &'static str,
+    pub error: Option<String>,
+    note: &'static str,
+}
+
+impl Report {
+    fn failed(path: &Path, name: String, e: String) -> Report {
+        Report {
+            name,
+            source: path.to_path_buf(),
+            from: None,
+            to: None,
+            outside_band: false,
+            output: None,
+            bytes: None,
+            chroma: "",
+            error: Some(e),
+            note: "",
+        }
+    }
+
+    /// The one line the CLI prints. Kept here so that changing what a run says
+    /// changes it in one place for both surfaces.
+    pub fn line(&self) -> String {
+        if let Some(e) = &self.error {
+            return format!("{}: {e}", self.name);
+        }
+        let (fw, fh) = self.from.unwrap_or((0, 0));
+        let (tw, th) = self.to.unwrap_or((0, 0));
+        let summary = format!("{}: {fw}x{fh} -> {tw}x{th}{}", self.name, self.note);
+        match self.bytes {
+            Some(b) => format!("{summary}  {} {} KB", self.chroma, b / 1024),
+            None => summary,
+        }
+    }
+}
+
+pub fn one(path: &Path, o: &Opts) -> Report {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
 
     // Orientation comes from the metadata reader rather than from the decoder,
     // because a HEIF's rotation lives in its EXIF and sips does not apply it.
@@ -221,7 +426,7 @@ fn one(path: &Path, o: &Opts) -> String {
 
     let decoded = match decode::open(path) {
         Ok(d) => d,
-        Err(e) => return format!("{name}: {e}"),
+        Err(e) => return Report::failed(path, name, e),
     };
 
     // Trust the measurement over the flag where the measurement can tell.
@@ -257,12 +462,20 @@ fn one(path: &Path, o: &Opts) -> String {
     } else {
         ""
     };
-    let summary = format!(
-        "{name}: {}x{} -> {}x{}{note}",
-        img.w, img.h, plan.canvas.0, plan.canvas.1
-    );
+    let mut report = Report {
+        name,
+        source: path.to_path_buf(),
+        from: Some((img.w, img.h)),
+        to: Some(plan.canvas),
+        outside_band: plan.outside_band,
+        output: None,
+        bytes: None,
+        chroma: o.chroma.label(),
+        error: None,
+        note,
+    };
     if o.dry {
-        return summary;
+        return report;
     }
 
     let cropped = if plan.crop == (0, 0, img.w, img.h) {
@@ -272,7 +485,7 @@ fn one(path: &Path, o: &Opts) -> String {
     };
     let scaled = match image::resize(&cropped, plan.scale.0, plan.scale.1) {
         Ok(s) => s,
-        Err(e) => return format!("{name}: {e}"),
+        Err(e) => return Report::failed(path, report.name, e),
     };
     let final_img = if plan.canvas != plan.scale {
         scaled.pad_onto(
@@ -287,21 +500,25 @@ fn one(path: &Path, o: &Opts) -> String {
     };
     let bytes = match encode::jpeg(&final_img, o.quality, o.chroma) {
         Ok(b) => b,
-        Err(e) => return format!("{name}: {e}"),
+        Err(e) => return Report::failed(path, report.name, e),
     };
     let dest = o.out_dir.join(format!(
         "{}.jpg",
         path.file_stem().unwrap_or_default().to_string_lossy()
     ));
     match std::fs::write(&dest, &bytes) {
-        Ok(()) => format!("{summary}  {} {} KB", o.chroma.label(), bytes.len() / 1024),
-        Err(e) => format!("{name}: {e}"),
+        Ok(()) => {
+            report.bytes = Some(bytes.len());
+            report.output = Some(dest);
+            report
+        }
+        Err(e) => Report::failed(path, report.name, format!("{}: {e}", dest.display())),
     }
 }
 
 const EXTS: [&str; 8] = ["jpg", "jpeg", "heif", "heic", "hif", "jxl", "png", "avif"];
 
-fn expand(paths: &[PathBuf]) -> Vec<PathBuf> {
+pub fn expand(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for p in paths {
         if p.is_dir() {

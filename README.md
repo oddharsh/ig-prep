@@ -59,6 +59,51 @@ grid, save what Instagram serves back, and score each against its source. That
 harness is the obvious next piece and the upload is the one step a program
 cannot do for you.
 
+## Point a model at it
+
+`ig-prep mcp` speaks [MCP](https://modelcontextprotocol.io) on stdin and stdout,
+so an assistant with file access can convert photographs where they already sit.
+
+```jsonc
+// claude_desktop_config.json, or any MCP client's server list
+{
+  "mcpServers": {
+    "ig-prep": {
+      "command": "ig-prep",
+      "args": ["mcp", "--root", "/Users/you/Pictures"]
+    }
+  }
+}
+```
+
+Then: *"convert everything in ~/Pictures/selects for Instagram."*
+
+Three tools. `ig_plan` reports what a conversion would do and writes nothing,
+`ig_convert` does it, and `ig_check_rotation` is `--check`. They take the same
+arguments the flags take and share the same defaults, because both surfaces call
+the same function — a tool server that reimplements its own CLI grows a second
+set of defaults and then disagrees with its own documentation.
+
+**Photographs never move and never enter the conversation.** The files are
+already on the machine the server runs on, so a result carries paths, sizes and
+dimensions rather than image data. That is a deliberate limit and not a missing
+feature: a converted frame is a few hundred kilobytes, which is roughly a
+megabyte of base64, and forty of them would be forty megabytes of a model's
+context spent on pixels it cannot look at anyway.
+
+**`--root` is the boundary.** Every path argument, inputs and output directory
+alike, is resolved through its symlinks and refused if it lands outside. Without
+it the server will convert anything it can read, which is fine for a tool you
+drive yourself and is worth thinking about before handing it to an agent.
+
+One call converts at most 200 files, and says how many it left, because a result
+listing 200 conversions of a 900-file directory otherwise reads as a complete
+run.
+
+The server answers the 2026-07-28 revision and the three before it. Both eras
+stay because a legacy client has no fall-forward mechanism: pointed at a
+modern-only server it does not negotiate down, it fails.
+
 ## --check
 
 A HEIF can state its rotation twice: as a container transform (`irot`, `imir`)

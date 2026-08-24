@@ -11,4 +11,9 @@ exif-sooc = { git = "https://github.com/oddharsh/exif-sooc" }
 fast_image_resize = "6"
 jpeg-encoder = "0.6"
 png = "0.17"
+# JSON-RPC needs a real JSON reader. Hand-rolling one to save a dependency
+# means hand-rolling string escapes and unicode, which is exactly where a
+# hand-rolled parser goes quietly wrong on a path containing a quote. Derive
+# is deliberately off: the server works in `Value` and pulls no proc-macro.
+serde_json = "1"
 zune-jpeg = "0.4"
