@@ -11,6 +11,7 @@ mod geometry;
 mod heif;
 mod image;
 
+use encode::Chroma;
 use geometry::{Fit, Gravity};
 use std::path::{Path, PathBuf};
 
@@ -33,7 +34,12 @@ FIT
 OPTIONS
     -w, --width <px>   target width (default 1440)
     -q <1-100>         JPEG quality (default 95)
-    --420              subsample chroma (default is 4:4:4)
+    --444              chroma at full resolution (default). The 3.58x/1.79x
+                       downscale means a 4:2:2 source still fills it.
+    --422              chroma halved horizontally, matching what the camera
+                       shot. The honest choice near native size.
+    --420              chroma halved on both axes, matching what Instagram
+                       stores anyway. Smallest upload.
     --pad-color <hex>  fill for --pad (default ffffff)
     -o, --out <dir>    output directory (default ./ig)
     -n, --dry-run      report the plan for each file, write nothing
@@ -46,7 +52,7 @@ fn main() {
     let mut args = std::env::args().skip(1).peekable();
     let (mut paths, mut fit, mut gravity) = (Vec::new(), Fit::Full, Gravity::Center);
     let mut width = geometry::TARGET_WIDTH;
-    let (mut quality, mut subsample, mut dry) = (95u8, false, false);
+    let (mut quality, mut chroma, mut dry) = (95u8, Chroma::Full, false);
     let mut check = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
@@ -57,7 +63,9 @@ fn main() {
             "--full" => fit = Fit::Full,
             "--crop" => fit = Fit::Crop,
             "--pad" => fit = Fit::Pad,
-            "--420" => subsample = true,
+            "--444" => chroma = Chroma::Full,
+            "--422" => chroma = Chroma::Halved,
+            "--420" => chroma = Chroma::Quartered,
             "-n" | "--dry-run" => dry = true,
             "--check" => check = true,
             "--gravity" => {
@@ -116,7 +124,7 @@ fn main() {
         gravity,
         width,
         quality,
-        subsample,
+        chroma,
         dry,
         pad,
         out_dir: out_dir.clone(),
@@ -195,7 +203,7 @@ struct Opts {
     gravity: Gravity,
     width: u32,
     quality: u8,
-    subsample: bool,
+    chroma: Chroma,
     dry: bool,
     pad: [u8; 3],
     out_dir: PathBuf,
@@ -277,7 +285,7 @@ fn one(path: &Path, o: &Opts) -> String {
     } else {
         scaled
     };
-    let bytes = match encode::jpeg(&final_img, o.quality, o.subsample) {
+    let bytes = match encode::jpeg(&final_img, o.quality, o.chroma) {
         Ok(b) => b,
         Err(e) => return format!("{name}: {e}"),
     };
@@ -286,7 +294,7 @@ fn one(path: &Path, o: &Opts) -> String {
         path.file_stem().unwrap_or_default().to_string_lossy()
     ));
     match std::fs::write(&dest, &bytes) {
-        Ok(()) => format!("{summary}  {} KB", bytes.len() / 1024),
+        Ok(()) => format!("{summary}  {} {} KB", o.chroma.label(), bytes.len() / 1024),
         Err(e) => format!("{name}: {e}"),
     }
 }
