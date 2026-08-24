@@ -527,6 +527,13 @@ fn call(id: Value, params: &Value, root: Option<&Path>) -> Value {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    // The NAME is checked before the arguments, because an unknown tool is a
+    // protocol fault rather than a bad request, and reporting a path problem
+    // for a tool that does not exist sends the caller to fix the wrong thing.
+    if !["ig_plan", "ig_convert", "ig_check_rotation"].contains(&name) {
+        return error(id, -32602, &format!("unknown tool {name}"), None);
+    }
+
     let (files, overflow) = match inputs(&args, root) {
         Ok(v) => v,
         Err(e) => return tool_error(id, e),
@@ -632,7 +639,15 @@ fn call(id: Value, params: &Value, root: Option<&Path>) -> Value {
             }
             tool_ok(id, text, out)
         }
-        other => error(id, -32602, &format!("unknown tool {other}"), None),
+        // Unreachable: the guard above already refused anything else. Kept so
+        // adding a tool to that list without adding an arm fails loudly here
+        // rather than silently answering nothing.
+        other => error(
+            id,
+            -32603,
+            &format!("tool {other} is listed but unimplemented"),
+            None,
+        ),
     }
 }
 
@@ -850,6 +865,23 @@ mod tests {
         v["result"]["isError"].as_bool().unwrap_or(false)
     }
 
+    /// A real directory pair, since the boundary is about paths that EXIST.
+    /// Built rather than borrowed from the filesystem: an earlier version
+    /// reached for `/etc`, which passes on Unix and fails on Windows for a
+    /// reason that has nothing to do with the boundary being tested.
+    fn sandbox(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("ig-prep-{tag}-{}", std::process::id()));
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        std::fs::create_dir_all(root.join("in")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("in").join("a.jpg"), b"not really a jpeg").unwrap();
+        std::fs::write(outside.join("b.jpg"), b"also not a jpeg").unwrap();
+        (root, outside)
+    }
+
     // ── the protocol ──────────────────────────────────────────────
 
     #[test]
@@ -998,26 +1030,21 @@ mod tests {
 
     #[test]
     fn root_refuses_a_path_outside_it() {
-        let dir = std::env::temp_dir()
-            .canonicalize()
-            .unwrap()
-            .join(format!("ig-prep-root-{}", std::process::id()));
-        let inside = dir.join("in");
-        std::fs::create_dir_all(&inside).unwrap();
-        std::fs::write(inside.join("a.jpg"), b"not really a jpeg").unwrap();
+        let (root, outside) = sandbox("root");
+        let inside = root.join("in");
 
-        assert!(under_root(&inside, Some(&dir), true).is_ok());
+        assert!(under_root(&inside, Some(&root), true).is_ok());
         // The classic escape, and the one a lexical check alone would miss if
         // it ran after the join rather than before.
-        assert!(under_root(&inside.join("../.."), Some(&dir), true).is_err());
-        assert!(under_root(Path::new("/etc"), Some(&dir), true).is_err());
+        assert!(under_root(&inside.join("../.."), Some(&root), true).is_err());
+        assert!(under_root(&outside, Some(&root), true).is_err());
         // An output directory that does not exist yet still has to land inside.
-        assert!(under_root(&dir.join("out"), Some(&dir), false).is_ok());
-        assert!(under_root(&dir.join("../out"), Some(&dir), false).is_err());
-        // With no root, everything resolves.
-        assert!(under_root(Path::new("/etc"), None, true).is_ok());
+        assert!(under_root(&root.join("out"), Some(&root), false).is_ok());
+        assert!(under_root(&root.join("../out"), Some(&root), false).is_err());
+        // With no root, a real path outside resolves fine.
+        assert!(under_root(&outside, None, true).is_ok());
 
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
     /// A symlink inside the root that points out of it must not widen the
@@ -1039,21 +1066,51 @@ mod tests {
 
     #[test]
     fn a_confined_call_reports_the_refusal_as_a_tool_error() {
-        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let (root, outside) = sandbox("call");
         // A tool error rather than a JSON-RPC error: the model should be able
-        // to read it and choose another path, not have the call unwind.
-        let r = call_tool(
-            "ig_plan",
-            json!({ "paths": ["/etc/hosts"] }),
-            Some(&dir.join("nowhere")),
-        );
+        // to read it and choose another path, rather than have the call unwind.
+        let target = outside.join("b.jpg").display().to_string();
+        let r = call_tool("ig_plan", json!({ "paths": [target] }), Some(&root));
         assert!(is_tool_error(&r));
         assert!(text_of(&r).contains("outside the root"));
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// Every name the catalogue advertises has to reach a dispatch arm. The
+    /// guard and the `match` list the same three names, and this is what keeps
+    /// them together when a fourth is added.
+    #[test]
+    fn every_advertised_tool_dispatches() {
+        let (root, _outside) = sandbox("dispatch");
+        let inside = root.join("in").display().to_string();
+        let out = root.join("out").display().to_string();
+        for t in tools().as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            let r = call_tool(
+                name,
+                json!({ "paths": [inside], "out_dir": out }),
+                Some(&root),
+            );
+            assert!(
+                r["error"].is_null(),
+                "{name} is advertised but did not dispatch: {}",
+                r["error"]
+            );
+        }
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
     #[test]
     fn an_unknown_tool_is_a_protocol_error() {
-        let r = call_tool("ig_nope", json!({ "paths": ["/etc/hosts"] }), None);
+        // Refused on the NAME, before its arguments are resolved, so a caller
+        // is told the thing that is actually wrong. The path here does not
+        // exist on any platform, which is the point.
+        let r = call_tool(
+            "ig_nope",
+            json!({ "paths": ["/nonexistent/anywhere.jpg"] }),
+            None,
+        );
         assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("ig_nope"));
     }
 }
