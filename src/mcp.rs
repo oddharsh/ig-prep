@@ -202,10 +202,10 @@ Prepares photographs for Instagram's compression, on this machine. Name paths \
 to files or directories; converted JPEGs are written to disk and the result \
 reports paths and sizes rather than image bytes. Start with ig_plan to see \
 what a conversion would do, then ig_convert to do it. The default delivers the \
-whole frame at 1440px wide so the framing choice stays in the Instagram app \
-and Instagram has nothing left to resample — tell the photographer to drag \
-rather than pinch-zoom, because zooming changes the scale and hands the \
-resample back.";
+whole frame at up to 1440px wide so the framing choice stays in the Instagram \
+app. Matching width does not guarantee that Instagram skips resampling. \
+Outputs are colour-managed SDR sRGB JPEGs; detected PQ/HLG input requires a \
+reviewed SDR export first.";
 
 // ── results ───────────────────────────────────────────────────────────
 
@@ -294,10 +294,9 @@ fn geometry_props(map: &mut Map<String, Value>) {
             "enum": ["full", "crop", "pad"],
             "default": "full",
             "description": "full delivers the whole frame at the target width and leaves the \
-                            framing choice to the Instagram app, which costs nothing because \
-                            cropping a portrait to 4:5 removes height only. crop takes the \
-                            nearest allowed ratio here instead. pad keeps the whole frame and \
-                            fills the rest.",
+                            framing choice to the Instagram app. crop takes the nearest allowed \
+                            ratio (3:4 to 1.91:1) here instead. pad keeps the whole frame and \
+                            fills the rest within the requested canvas width.",
         }),
     );
     map.insert(
@@ -317,9 +316,8 @@ fn geometry_props(map: &mut Map<String, Value>) {
             "maximum": 16384,
             "default": 1440,
             "description": "Target delivery width in pixels. 1440 is a deliberate guess rather \
-                            than a measured fact: guessing high costs Instagram one clean \
-                            downscale, guessing low makes it upscale and invent detail. A frame \
-                            already narrower than this is never enlarged.",
+                            than a measured fact. Compare 1080 and 1440 on your upload path. \
+                            Padding counts towards this limit. Source pixels never enlarge.",
         }),
     );
 }
@@ -339,6 +337,7 @@ fn tools() -> Value {
                             named after its source stem.",
         }),
     );
+    convert_props.insert("dither".into(), json!({"type":"boolean", "default":false, "description":"Experimental deterministic dither at final 8-bit quantization. Compare returned Instagram images before enabling by default."}));
     convert_props.insert(
         "quality".into(),
         json!({
@@ -354,9 +353,8 @@ fn tools() -> Value {
             "enum": ["444", "422", "420"],
             "default": "444",
             "description": "Output chroma resolution. 444 hands Instagram's own encoder \
-                            full-resolution chroma to average rather than chroma already halved \
-                            once. 422 is the honest choice near native size, where a 4:2:2 \
-                            source cannot fill 4:4:4. 420 is the smallest upload.",
+                            full-resolution chroma; 422 halves it horizontally, and 420 halves \
+                            both axes. Compare returned images before choosing a setting.",
         }),
     );
     convert_props.insert(
@@ -444,7 +442,7 @@ fn file_props(converted: bool) -> Value {
         },
         "outside_band": {
             "type": "boolean",
-            "description": "True when the source ratio falls outside 4:5 to 1.91:1, so \
+            "description": "True when the source ratio falls outside 3:4 to 1.91:1, so \
                             Instagram will crop it unless fit=crop or fit=pad handled it here.",
         },
         "error": { "type": "string", "description": "Present only if this file failed." },
@@ -723,6 +721,9 @@ fn geometry_opts(args: &Value) -> Result<Opts, String> {
 fn convert_opts(args: &Value, root: Option<&Path>) -> Result<Opts, String> {
     let mut o = geometry_opts(args)?;
     o.dry = false;
+    if let Some(dither) = args.get("dither") {
+        o.dither = dither.as_bool().ok_or("dither must be a boolean")?;
+    }
     if let Some(q) = args.get("quality") {
         let q = q
             .as_u64()
@@ -998,6 +999,9 @@ mod tests {
         assert_eq!(o.gravity, Gravity::Center);
         let c = convert_opts(&json!({}), None).unwrap();
         assert_eq!(c.quality, 95);
+        assert!(!c.dither);
+        assert!(convert_opts(&json!({"dither":true}), None).unwrap().dither);
+        assert!(convert_opts(&json!({"dither":"yes"}), None).is_err());
         assert!(c.chroma == Chroma::Full);
     }
 

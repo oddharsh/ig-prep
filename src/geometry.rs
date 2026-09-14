@@ -8,28 +8,17 @@
 
 /// Widest frame Instagram shows without cropping (1.91:1).
 pub const MAX_LANDSCAPE: f64 = 1.91;
-/// Tallest frame Instagram shows without cropping (4:5).
-pub const MIN_PORTRAIT: f64 = 0.8;
+/// Tallest frame Instagram shows without cropping (3:4).
+pub const MIN_PORTRAIT: f64 = 0.75;
 
-/// Pixel width to deliver.
-///
-/// UNVERIFIED, and the single most valuable thing a calibration run would
-/// settle. 1440 is chosen over 1080 because the failure modes are not
-/// symmetric: if Instagram wants 1080 it downscales cleanly from 1440, and if
-/// it wants 1440 and gets 1080 it UPSCALES, which invents detail that was never
-/// there. Guessing high costs a resample; guessing low costs the picture.
+/// Baseline width. Compare 1080 and 1440 via --variants before assuming a
+/// particular upload client or served rendition preserves these dimensions.
 pub const TARGET_WIDTH: u32 = 1440;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
-    /// Deliver the whole frame at the target width, and crop in the app.
-    ///
-    /// This is the default because it keeps the framing decision with the
-    /// photographer AND costs nothing: cropping a portrait to 4:5 removes
-    /// HEIGHT only, so every vertical crop of a target-width frame is already
-    /// exactly the target size and Instagram has nothing left to resample.
-    /// The one thing that breaks it is pinch-zooming in the crop UI, which
-    /// changes the scale and puts the resample back.
+    /// Keep the full frame and leave the crop decision in the app.
+    /// Matching width alone does not prove that the app avoids resampling.
     Full,
     /// Crop to the nearest allowed ratio here rather than in the app.
     Crop,
@@ -64,8 +53,35 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
     let ratio = w as f64 / h as f64;
     let outside_band = !(MIN_PORTRAIT..=MAX_LANDSCAPE).contains(&ratio);
 
-    // Never enlarge. Upscaling to reach a target invents detail, and a frame
-    // smaller than the target is better delivered as it is.
+    // Choose the padded canvas first, then fit the source into it. Width is
+    // the FINAL canvas limit, including borders; source pixels never enlarge.
+    if fit == Fit::Pad && outside_band {
+        let want = ratio.clamp(MIN_PORTRAIT, MAX_LANDSCAPE);
+        let native_width = if ratio < want {
+            (h as f64 * want).ceil() as u32
+        } else {
+            w
+        };
+        let canvas_w = target_width.min(native_width);
+        let canvas_h = if ratio < want {
+            (canvas_w as f64 / want).floor().max(1.0) as u32
+        } else {
+            (canvas_w as f64 / want).ceil().max(1.0) as u32
+        };
+        let factor = (canvas_w as f64 / w as f64)
+            .min(canvas_h as f64 / h as f64)
+            .min(1.0);
+        let scale_w = (w as f64 * factor).round().max(1.0) as u32;
+        let scale_h = (h as f64 * factor).round().max(1.0) as u32;
+        return Plan {
+            crop: (0, 0, w, h),
+            scale: (scale_w, scale_h),
+            canvas: (canvas_w, canvas_h),
+            offset: ((canvas_w - scale_w) / 2, (canvas_h - scale_h) / 2),
+            ratio: canvas_w as f64 / canvas_h as f64,
+            outside_band,
+        };
+    }
     let width = target_width.min(w);
 
     let (crop, ratio_used) = match (fit, outside_band) {
@@ -77,7 +93,7 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
             };
             if ratio < want {
                 // Too tall: take a shorter slice, full width.
-                let new_h = (w as f64 / want).round() as u32;
+                let new_h = (w as f64 / want).floor() as u32;
                 let y = match gravity {
                     Gravity::Top => 0,
                     Gravity::Bottom => h - new_h,
@@ -86,7 +102,7 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
                 ((0, y, w, new_h), want)
             } else {
                 // Too wide: take a narrower slice, full height.
-                let new_w = (h as f64 * want).round() as u32;
+                let new_w = (h as f64 * want).floor() as u32;
                 ((((w - new_w) / 2), 0, new_w, h), want)
             }
         }
@@ -99,29 +115,8 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
         .round()
         .max(1.0) as u32;
 
-    let (canvas, offset) = if fit == Fit::Pad && outside_band {
-        let want = if ratio < MIN_PORTRAIT {
-            MIN_PORTRAIT
-        } else {
-            MAX_LANDSCAPE
-        };
-        if ratio < want {
-            // Too tall to show: widen the canvas rather than cut the picture.
-            let cw2 = ((scale_h as f64) * want).round() as u32;
-            (
-                (cw2.max(scale_w), scale_h),
-                ((cw2.saturating_sub(scale_w)) / 2, 0),
-            )
-        } else {
-            let ch2 = ((scale_w as f64) / want).round() as u32;
-            (
-                (scale_w, ch2.max(scale_h)),
-                (0, (ch2.saturating_sub(scale_h)) / 2),
-            )
-        }
-    } else {
-        ((scale_w, scale_h), (0, 0))
-    };
+    let canvas = (scale_w, scale_h);
+    let offset = (0, 0);
 
     Plan {
         crop,
@@ -137,17 +132,15 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
 mod tests {
     use super::*;
 
-    /// The claim the default mode rests on: a 4:5 crop of a target-width
-    /// portrait is already exactly the target size, so Instagram has no reason
-    /// to resample. If this stops holding, the default is no longer free.
+    /// This verifies geometry, not Instagram's upload implementation.
     #[test]
-    fn a_four_five_crop_of_a_full_frame_needs_no_resample() {
+    fn a_three_four_crop_of_a_full_frame_fits_at_the_requested_width() {
         let p = plan(5152, 7728, Fit::Full, Gravity::Center, 1440);
         assert_eq!(p.scale.0, 1440, "delivered at the target width");
-        // The user drags a 4:5 window over it in the app.
+        // The user drags a 3:4 window over it in the app.
         let crop_h = (p.scale.0 as f64 / MIN_PORTRAIT).round() as u32;
-        assert_eq!((p.scale.0, crop_h), (1440, 1800));
-        assert!(crop_h <= p.scale.1, "the 4:5 window fits inside the frame");
+        assert_eq!((p.scale.0, crop_h), (1440, 1920));
+        assert!(crop_h <= p.scale.1, "the 3:4 window fits inside the frame");
     }
 
     #[test]
@@ -162,8 +155,8 @@ mod tests {
     fn cropping_a_two_three_portrait_takes_height_only() {
         let p = plan(5152, 7728, Fit::Crop, Gravity::Center, 1440);
         assert_eq!(p.crop.2, 5152, "full width is kept");
-        assert_eq!(p.crop.3, 6440, "height is cut to reach 4:5");
-        assert_eq!(p.scale, (1440, 1800));
+        assert_eq!(p.crop.3, 6869, "height is cut to reach 3:4");
+        assert_eq!(p.scale, (1440, 1920));
     }
 
     #[test]
@@ -171,6 +164,8 @@ mod tests {
         let p = plan(5152, 7728, Fit::Pad, Gravity::Center, 1440);
         assert_eq!(p.crop, (0, 0, 5152, 7728), "nothing is cut");
         assert_eq!(p.canvas.0 as f64 / p.canvas.1 as f64, MIN_PORTRAIT);
+        assert_eq!(p.canvas, (1440, 1920));
+        assert_eq!(p.scale, (1280, 1920));
         assert!(p.offset.0 > 0, "the frame is centred in a wider canvas");
     }
 
@@ -185,6 +180,39 @@ mod tests {
         let top = plan(5152, 7728, Fit::Crop, Gravity::Top, 1440);
         let bottom = plan(5152, 7728, Fit::Crop, Gravity::Bottom, 1440);
         assert_eq!(top.crop.1, 0);
-        assert_eq!(bottom.crop.1, 7728 - 6440);
+        assert_eq!(bottom.crop.1, 7728 - 6869);
+    }
+
+    #[test]
+    fn three_four_is_in_band_for_every_fit() {
+        for fit in [Fit::Full, Fit::Crop, Fit::Pad] {
+            let p = plan(3000, 4000, fit, Gravity::Center, 1440);
+            assert!(!p.outside_band);
+            assert_eq!(p.canvas, (1440, 1920));
+            assert_eq!(p.crop, (0, 0, 3000, 4000));
+        }
+    }
+    #[test]
+    fn padded_canvas_obeys_width_and_never_enlarges_content() {
+        for (w, h) in [
+            (5152, 7728),
+            (1440, 2160),
+            (90, 180),
+            (10000, 1000),
+            (1, 100),
+            (100, 1),
+        ] {
+            for width in [1, 1080, 1440] {
+                let p = plan(w, h, Fit::Pad, Gravity::Center, width);
+                assert!(p.canvas.0 <= width);
+                assert!(p.scale.0 <= w && p.scale.1 <= h);
+                assert!(p.offset.0 + p.scale.0 <= p.canvas.0);
+                assert!(p.offset.1 + p.scale.1 <= p.canvas.1);
+                assert!((MIN_PORTRAIT..=MAX_LANDSCAPE).contains(&p.ratio));
+            }
+        }
+        let p = plan(90, 180, Fit::Pad, Gravity::Center, 1440);
+        assert_eq!(p.scale, (90, 180));
+        assert_eq!(p.canvas, (135, 180));
     }
 }

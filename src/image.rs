@@ -1,19 +1,18 @@
-//! An 8-bit RGB image, and the two things that must happen to it in the right
-//! order: EXIF rotation, then resizing in linear light.
+//! Floating-point linear sRGB. Colour conversion precedes geometry; only export quantizes.
 
 pub struct Rgb {
     pub w: u32,
     pub h: u32,
-    pub px: Vec<u8>,
+    pub px: Vec<f32>,
 }
 
 impl Rgb {
-    pub fn new(w: u32, h: u32, px: Vec<u8>) -> Self {
+    pub fn new(w: u32, h: u32, px: Vec<f32>) -> Self {
         debug_assert_eq!(px.len(), (w as usize) * (h as usize) * 3);
         Self { w, h, px }
     }
 
-    fn at(&self, x: u32, y: u32) -> [u8; 3] {
+    fn at(&self, x: u32, y: u32) -> [f32; 3] {
         let i = ((y as usize) * (self.w as usize) + x as usize) * 3;
         [self.px[i], self.px[i + 1], self.px[i + 2]]
     }
@@ -31,7 +30,7 @@ impl Rgb {
         let (w, h) = (self.w, self.h);
         let swap = matches!(orientation, 5..=8);
         let (nw, nh) = if swap { (h, w) } else { (w, h) };
-        let mut px = vec![0u8; (nw as usize) * (nh as usize) * 3];
+        let mut px = vec![0.0; (nw as usize) * (nh as usize) * 3];
         for y in 0..h {
             for x in 0..w {
                 let (nx, ny) = match orientation {
@@ -63,6 +62,7 @@ impl Rgb {
 
     /// Place this image onto a larger canvas of a solid colour.
     pub fn pad_onto(&self, cw: u32, ch: u32, ox: u32, oy: u32, fill: [u8; 3]) -> Rgb {
+        let fill = fill.map(|v| crate::color::srgb_to_linear(v as f32 / 255.0));
         let mut px = Vec::with_capacity((cw as usize) * (ch as usize) * 3);
         for _ in 0..(cw as usize) * (ch as usize) {
             px.extend_from_slice(&fill);
@@ -78,72 +78,63 @@ impl Rgb {
     }
 }
 
-/// sRGB transfer function, both ways.
-///
-/// Resizing averages pixels, and averaging sRGB values averages the wrong
-/// numbers: sRGB is a perceptual encoding, so the mean of two encoded values is
-/// not the encoding of the mean light. The visible cost is darkened edges and
-/// muddy highlights, worst exactly where a photograph has fine detail against a
-/// bright sky. So the image goes to linear light, gets resized, and comes back.
-fn srgb_to_linear_table() -> [f32; 256] {
-    let mut t = [0f32; 256];
-    for (i, v) in t.iter_mut().enumerate() {
-        let c = i as f32 / 255.0;
-        *v = if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        };
-    }
-    t
-}
-
-fn linear_to_srgb(v: f32) -> u8 {
-    let c = v.clamp(0.0, 1.0);
-    let s = if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
-}
-
-/// Resize with Lanczos3, in linear light.
+/// Lanczos3 operates directly on linear-light samples, without an intermediate copy.
 pub fn resize(src: &Rgb, w: u32, h: u32) -> Result<Rgb, String> {
-    use fast_image_resize::images::Image;
+    use fast_image_resize::images::{Image, ImageRef};
     use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-
     if (src.w, src.h) == (w, h) {
-        return Ok(Rgb::new(src.w, src.h, src.px.clone()));
+        return Ok(Rgb::new(w, h, src.px.clone()));
     }
-
-    // Build the f32 buffer in ONE pass, straight into the bytes the resizer
-    // wants. A 40 megapixel frame is 478 MB as f32x3, so materialising it twice
-    // (once as f32, once as bytes) costs nearly a gigabyte of traffic to say
-    // the same thing. Measured on a 5152x7728 HIF, removing the second copy
-    // took a file from 2.4s to under a second.
-    let table = srgb_to_linear_table();
-    let mut bytes = vec![0u8; src.px.len() * 4];
-    for (chunk, &i) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(src.px.iter()) {
-        chunk.copy_from_slice(&table[i as usize].to_ne_bytes());
-    }
-    let src_img = Image::from_vec_u8(src.w, src.h, bytes, PixelType::F32x3)
-        .map_err(|e| format!("source image: {e}"))?;
-    let mut dst_img = Image::new(w, h, PixelType::F32x3);
+    let source = ImageRef::new(
+        src.w,
+        src.h,
+        bytemuck::cast_slice(&src.px),
+        PixelType::F32x3,
+    )
+    .map_err(|e| format!("source image: {e}"))?;
+    let mut pixels = vec![0.0f32; w as usize * h as usize * 3];
+    let mut target = Image::from_slice_u8(
+        w,
+        h,
+        bytemuck::cast_slice_mut(&mut pixels),
+        PixelType::F32x3,
+    )
+    .map_err(|e| format!("target image: {e}"))?;
     Resizer::new()
         .resize(
-            &src_img,
-            &mut dst_img,
+            &source,
+            &mut target,
             &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)),
         )
         .map_err(|e| format!("resize: {e}"))?;
+    Ok(Rgb::new(w, h, pixels))
+}
 
-    let out: Vec<u8> = dst_img
-        .buffer()
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| linear_to_srgb(f32::from_ne_bytes([c[0], c[1], c[2], c[3]])))
-        .collect();
-    Ok(Rgb::new(w, h, out))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn resizing_averages_light_without_quantizing() {
+        let src = Rgb::new(2, 1, vec![0.1, 0.1, 0.1, 0.1001, 0.1001, 0.1001]);
+        let out = resize(&src, 1, 1).unwrap();
+        assert!((out.px[0] - 0.10005).abs() < 0.00001);
+        assert_eq!(resize(&src, 2, 1).unwrap().px, src.px);
+    }
+    #[test]
+    fn padding_colour_is_also_linear() {
+        let src = Rgb::new(1, 1, vec![1.0; 3]);
+        let out = src.pad_onto(3, 1, 1, 0, [128; 3]);
+        assert!((out.px[0] - 0.21586).abs() < 0.0001);
+        assert_eq!(&out.px[3..6], &[1.0; 3]);
+    }
+    #[test]
+    fn all_orientations_preserve_float_samples() {
+        let img = || Rgb::new(2, 3, (0..18).map(|i| i as f32 / 19.0).collect());
+        for orientation in 1..=8 {
+            let mut values = img().oriented(orientation).px;
+            values.sort_by(f32::total_cmp);
+            assert_eq!(values, img().px);
+        }
+        assert_eq!((img().oriented(6).w, img().oriented(6).h), (3, 2));
+    }
 }

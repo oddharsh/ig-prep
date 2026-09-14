@@ -15,11 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
-      - run: cargo test --release
-      # Geometry, orientation maths and the HEIF property walk all run
-      # everywhere. Decoding a HEIF needs `sips`, so that path is exercised on
-      # macOS by hand rather than pretended at here.
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
+      # macOS also checks sips profile/precision interoperability.
+      # Camera-specific HEIF bitstreams still need representative originals.
 
   lint:
     runs-on: ubuntu-latest
@@ -29,4 +28,4 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings

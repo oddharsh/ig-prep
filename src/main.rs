@@ -1,10 +1,10 @@
 //! ig-prep: prepare photographs for Instagram's compression.
 //!
-//! The whole idea is to do the destructive work ourselves, carefully, so that
-//! Instagram has as little left to do as possible. It resizes and re-encodes
-//! whatever it receives; what it does NOT do is resample an image that already
-//! arrives at the size it wants.
+//! Controls colour conversion, precision and downscaling before upload.
+//! Actual Instagram processing is measured separately through a round trip.
 
+mod color;
+mod comparison;
 mod decode;
 mod encode;
 mod geometry;
@@ -25,9 +25,8 @@ USAGE:
     Reads JPEG, HEIF/HEIC/HIF, JPEG XL and PNG. Writes sRGB JPEG.
 
 FIT
-    --full        deliver the whole frame at the target width (default), so you
-                  can still choose the framing in the app and Instagram has
-                  nothing left to resample. Drag, do not pinch-zoom.
+    --full        deliver the whole frame at the target width (default);
+                  choose the final crop in the app
     --crop        crop to Instagram's nearest allowed ratio here instead
     --pad         pad to it, keeping the whole frame
     --gravity <center|top|bottom>   where --crop takes its window
@@ -35,18 +34,26 @@ FIT
 OPTIONS
     -w, --width <px>   target width (default 1440)
     -q <1-100>         JPEG quality (default 95)
-    --444              chroma at full resolution (default). The 3.58x/1.79x
-                       downscale means a 4:2:2 source still fills it.
-    --422              chroma halved horizontally, matching what the camera
-                       shot. The honest choice near native size.
-    --420              chroma halved on both axes, matching what Instagram
-                       stores anyway. Smallest upload.
+    --444              full chroma resolution (default)
+    --422              chroma halved horizontally
+    --420              chroma halved on both axes
+    --dither           experimental dither at final 8-bit quantization
+    --variants         write eight variants (1080/1440, q90/95, 444/420),
+                       references and a manifest to a NEW --out directory;
+                       use --crop or --pad for out-of-band sources
     --pad-color <hex>  fill for --pad (default ffffff)
     -o, --out <dir>    output directory (default ./ig)
     -n, --dry-run      report the plan for each file, write nothing
     --check            report files whose two rotations disagree, convert
                        nothing. Exits non-zero if any do.
     -h, --help
+
+COMPARISON
+    ig-prep --variants --crop -o comparison <PATH>...
+    ig-prep score comparison
+                  Download served images into comparison/returned/ with their
+                  upload filenames, then score against the lossless references.
+                  Scoring supports the same image formats as conversion.
 
 MCP SERVER
     ig-prep mcp [--root <dir>]
@@ -62,6 +69,20 @@ fn main() {
     // option loop because everything below parses arguments for a conversion
     // this process is not going to perform.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("score") {
+        if argv.len() != 2 {
+            eprintln!("Usage: ig-prep score <comparison-directory>");
+            std::process::exit(2);
+        }
+        match comparison::score(Path::new(&argv[1])) {
+            Ok(report) => println!("{report}"),
+            Err(e) => {
+                eprintln!("ig-prep: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if argv.first().map(String::as_str) == Some("mcp") {
         let mut root = None;
         let mut rest = argv[1..].iter();
@@ -88,6 +109,8 @@ fn main() {
     let mut width = geometry::TARGET_WIDTH;
     let (mut quality, mut chroma, mut dry) = (95u8, Chroma::Full, false);
     let mut check = false;
+    let mut dither = false;
+    let mut variants = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
 
@@ -102,6 +125,8 @@ fn main() {
             "--420" => chroma = Chroma::Quartered,
             "-n" | "--dry-run" => dry = true,
             "--check" => check = true,
+            "--dither" => dither = true,
+            "--variants" => variants = true,
             "--gravity" => {
                 gravity = match args.next().as_deref() {
                     Some("top") => Gravity::Top,
@@ -115,7 +140,7 @@ fn main() {
             "--pad-color" => {
                 if let Some(h) = args.next() {
                     let h = h.trim_start_matches('#');
-                    if h.len() == 6 {
+                    if h.len() == 6 && h.is_ascii() && h.bytes().all(|b| b.is_ascii_hexdigit()) {
                         for i in 0..3 {
                             pad[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(255);
                         }
@@ -135,6 +160,25 @@ fn main() {
         std::process::exit(2);
     }
 
+    if !(1..=16384).contains(&width) || !(1..=100).contains(&quality) {
+        eprintln!("ig-prep: width must be 1..16384 and quality must be 1..100");
+        std::process::exit(2);
+    }
+    if variants
+        && (check
+            || dry
+            || argv.iter().any(|s| {
+                matches!(
+                    s.as_str(),
+                    "-w" | "--width" | "-q" | "--444" | "--422" | "--420"
+                )
+            }))
+    {
+        eprintln!(
+            "ig-prep: --variants uses fixed width, quality and chroma values; it cannot combine with --check or --dry-run"
+        );
+        std::process::exit(2);
+    }
     let files = expand(&paths);
     if files.is_empty() {
         eprintln!("ig-prep: no readable images");
@@ -143,7 +187,10 @@ fn main() {
     if check {
         std::process::exit(run_check(&files));
     }
-    if !dry && let Err(e) = std::fs::create_dir_all(&out_dir) {
+    if !dry
+        && !variants
+        && let Err(e) = std::fs::create_dir_all(&out_dir)
+    {
         eprintln!("ig-prep: {}: {e}", out_dir.display());
         std::process::exit(1);
     }
@@ -154,13 +201,28 @@ fn main() {
         width,
         quality,
         chroma,
+        dither,
         dry,
         pad,
         out_dir: out_dir.clone(),
     };
 
-    for r in run_all(&files, &opts) {
+    if variants {
+        match comparison::generate(&files, &opts) {
+            Ok(path) => println!("Comparison written to {}", path.display()),
+            Err(e) => {
+                eprintln!("ig-prep: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let reports = run_all(&files, &opts);
+    for r in &reports {
         println!("{}", r.line());
+    }
+    if reports.iter().any(|r| r.error.is_some()) {
+        std::process::exit(1);
     }
 }
 
@@ -178,6 +240,7 @@ pub fn run_all(files: &[PathBuf], opts: &Opts) -> Vec<Report> {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
+        .min(2) // Bound peak memory while retaining full-precision camera frames.
         .min(files.len());
     let chunk = files.len().div_ceil(threads);
     let parts: Vec<Vec<Report>> = std::thread::scope(|s| {
@@ -322,6 +385,7 @@ pub struct Opts {
     pub width: u32,
     pub quality: u8,
     pub chroma: Chroma,
+    pub dither: bool,
     pub dry: bool,
     pad: [u8; 3],
     pub out_dir: PathBuf,
@@ -337,6 +401,7 @@ impl Opts {
             width: geometry::TARGET_WIDTH,
             quality: 95,
             chroma: Chroma::Full,
+            dither: false,
             dry: false,
             pad: [255, 255, 255],
             out_dir: PathBuf::from("ig"),
@@ -347,7 +412,7 @@ impl Opts {
     /// the fill alone rather than substituting a colour nobody asked for.
     pub fn set_pad_color(&mut self, hex: &str) {
         let h = hex.trim_start_matches('#');
-        if h.len() == 6 {
+        if h.len() == 6 && h.is_ascii() && h.bytes().all(|b| b.is_ascii_hexdigit()) {
             for i in 0..3 {
                 self.pad[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(255);
             }
@@ -417,39 +482,9 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         .to_string_lossy()
         .into_owned();
 
-    // Orientation comes from the metadata reader rather than from the decoder,
-    // because a HEIF's rotation lives in its EXIF and sips does not apply it.
-    let orientation = exif_sooc::read(path)
-        .ok()
-        .and_then(|p| p.get("Orientation").and_then(|t| t.value.as_i64()))
-        .unwrap_or(1) as u16;
-
-    let decoded = match decode::open(path) {
-        Ok(d) => d,
+    let img = match load_oriented(path) {
+        Ok(img) => img,
         Err(e) => return Report::failed(path, name, e),
-    };
-
-    // Trust the measurement over the flag where the measurement can tell.
-    // A rotation that swaps the axes is visible in the dimensions: if the
-    // decoder handed back the DISPLAY shape rather than the stored one, it
-    // rotated, whatever this build believes about that decoder. Orientations
-    // 2, 3 and 4 are mirrors and a 180 turn, which leave the dimensions alone,
-    // so those fall back to the per-decoder flag.
-    let swaps = matches!(orientation, 5..=8);
-    let already = if swaps {
-        exif_sooc::read(path)
-            .ok()
-            .and_then(|p| p.dimensions())
-            .map(|(dw, dh)| (decoded.img.w, decoded.img.h) == (dw, dh))
-            .unwrap_or(decoded.orientation_applied)
-    } else {
-        decoded.orientation_applied
-    };
-
-    let img = if already {
-        decoded.img
-    } else {
-        decoded.img.oriented(orientation)
     };
 
     let plan = geometry::plan(img.w, img.h, o.fit, o.gravity, o.width);
@@ -478,27 +513,11 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         return report;
     }
 
-    let cropped = if plan.crop == (0, 0, img.w, img.h) {
-        img
-    } else {
-        img.crop(plan.crop.0, plan.crop.1, plan.crop.2, plan.crop.3)
-    };
-    let scaled = match image::resize(&cropped, plan.scale.0, plan.scale.1) {
-        Ok(s) => s,
+    let final_img = match render(&img, &plan, o.pad) {
+        Ok(img) => img,
         Err(e) => return Report::failed(path, report.name, e),
     };
-    let final_img = if plan.canvas != plan.scale {
-        scaled.pad_onto(
-            plan.canvas.0,
-            plan.canvas.1,
-            plan.offset.0,
-            plan.offset.1,
-            o.pad,
-        )
-    } else {
-        scaled
-    };
-    let bytes = match encode::jpeg(&final_img, o.quality, o.chroma) {
+    let bytes = match encode::jpeg(&final_img, o.quality, o.chroma, o.dither) {
         Ok(b) => b,
         Err(e) => return Report::failed(path, report.name, e),
     };
@@ -514,6 +533,64 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         }
         Err(e) => Report::failed(path, report.name, format!("{}: {e}", dest.display())),
     }
+}
+
+fn load_oriented(path: &Path) -> Result<image::Rgb, String> {
+    // Orientation comes from the metadata reader rather than from the decoder,
+    // because a HEIF's rotation lives in its EXIF and sips does not apply it.
+    let orientation = exif_sooc::read(path)
+        .ok()
+        .and_then(|p| p.get("Orientation").and_then(|t| t.value.as_i64()))
+        .unwrap_or(1) as u16;
+
+    let decoded = decode::open(path)?;
+
+    // Trust the measurement over the flag where the measurement can tell.
+    // A rotation that swaps the axes is visible in the dimensions: if the
+    // decoder handed back the DISPLAY shape rather than the stored one, it
+    // rotated, whatever this build believes about that decoder. Orientations
+    // 2, 3 and 4 are mirrors and a 180 turn, which leave the dimensions alone,
+    // so those fall back to the per-decoder flag.
+    let swaps = matches!(orientation, 5..=8);
+    let already = if swaps {
+        exif_sooc::read(path)
+            .ok()
+            .and_then(|p| p.dimensions())
+            .map(|(dw, dh)| (decoded.img.w, decoded.img.h) == (dw, dh))
+            .unwrap_or(decoded.orientation_applied)
+    } else {
+        decoded.orientation_applied
+    };
+
+    let img = if already {
+        decoded.img
+    } else {
+        decoded.img.oriented(orientation)
+    };
+
+    Ok(img)
+}
+
+fn render(img: &image::Rgb, plan: &geometry::Plan, pad: [u8; 3]) -> Result<image::Rgb, String> {
+    let cropped;
+    let src = if plan.crop == (0, 0, img.w, img.h) {
+        img
+    } else {
+        cropped = img.crop(plan.crop.0, plan.crop.1, plan.crop.2, plan.crop.3);
+        &cropped
+    };
+    let scaled = image::resize(src, plan.scale.0, plan.scale.1)?;
+    Ok(if plan.canvas != plan.scale {
+        scaled.pad_onto(
+            plan.canvas.0,
+            plan.canvas.1,
+            plan.offset.0,
+            plan.offset.1,
+            pad,
+        )
+    } else {
+        scaled
+    })
 }
 
 const EXTS: [&str; 8] = ["jpg", "jpeg", "heif", "heic", "hif", "jxl", "png", "avif"];
