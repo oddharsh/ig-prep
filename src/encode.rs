@@ -8,7 +8,7 @@ use zenjpeg::encoder::{
 };
 
 /// Identifies the encoder, precision and optimization recipe in experiments.
-pub const PROFILE: &str = "zenjpeg-0.8.4-ycbcr-hybrid-progressive-search-f32-v1";
+pub const PROFILE: &str = "zenjpeg-0.8.4-ycbcr-hybrid-progressive-search-f32-sharpyuv-v2";
 pub const DEFAULT_QUALITY: u8 = 99;
 
 /// What the chroma plane is worth on the way out, named for the JPEG ratio.
@@ -58,9 +58,7 @@ pub fn jpeg(img: &Rgb, quality: u8, chroma: Chroma, dither: bool) -> Result<Vec<
         // auto_optimize resets scan mode, so scan search must follow it.
         .auto_optimize(true)
         .scan_mode(ProgressiveScanMode::ProgressiveSearch)
-        // In 0.8.4 the SharpYUV path interprets samples as u8, even with an
-        // f32 layout. Use the standard float conversion/downsampling path.
-        .sharp_yuv(false);
+        .sharp_yuv(chroma != Chroma::Full);
     let mut enc = config
         .request()
         .icc_profile(crate::color::SRGB_ICC)

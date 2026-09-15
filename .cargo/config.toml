@@ -1,0 +1,3 @@
+[net]
+# ZenJPEG's reference submodules include googlesource; use Git's transport.
+git-fetch-with-cli = true

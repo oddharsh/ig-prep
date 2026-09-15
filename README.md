@@ -54,7 +54,8 @@ again. Upload clients and served renditions need to be measured.
 
 ## JPEG encoder
 
-The encoder is **ZenJPEG 0.8.4**, pinned to match the site's JPEG stack:
+The encoder is **ZenJPEG 0.8.4**, using the site's JPEG stack with a
+[pinned SharpYUV input fix](https://github.com/oddharsh/zenjpeg/commit/d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63):
 
 - Standard YCbCr JPEG with an embedded sRGB ICC profile.
 - Adaptive quantization and hybrid trellis optimization via `auto_optimize(true)`.
@@ -63,10 +64,21 @@ The encoder is **ZenJPEG 0.8.4**, pinned to match the site's JPEG stack:
   the scan mode. Optimized Huffman coding and deringing retain upstream defaults.
 - Floating-point input throughout; no intermediate 8-bit RGB conversion.
 
-SharpYUV remains disabled. In ZenJPEG 0.8.4 its subsampling path assumes byte
-samples and corrupts floating-point input. The standard float conversion and
-downsampling path handles `--422` and `--420`; default `--444` retains every
-chroma sample. A decoded-colour regression test covers all three modes.
+SharpYUV is enabled for `--422` and `--420`. The pinned fix makes its chroma
+path interpret linear floating-point samples correctly, preserving their
+precision instead of reading their bytes as RGB8. It also corrects u16 and BGR
+layouts in the dependency. Default `--444` retains every chroma sample and
+produces the same bytes as before this fix.
+
+The dependency's regression tests cover both gamma-aware methods, equivalent
+sample layouts, odd dimensions, padded rows and chunked input, using an
+independent JPEG decoder. ig-prep also checks decoded colours in all three modes.
+See the [source fix and validation notes](https://github.com/oddharsh/zenjpeg/blob/d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63/docs/SHARPYUV_INPUT_FIX.md).
+On the same six local references used below, mean SSIMULACRA2 / Butteraugli
+changed from 89.952 / 1.456 to 89.989 / 1.425 for 4:2:2, and from
+88.820 / 1.771 to 88.969 / 1.694 for 4:2:0. Sizes changed by less than 0.04%.
+These are small local gains; 4:4:4 still scored best. No Instagram round trip
+was performed for this fix.
 
 `-q` now uses ZenJPEG's approximate jpegli quality scale. Equal numbers do not
 mean equal quality or file size across encoders. The default changes from the
@@ -212,7 +224,10 @@ interpret.
 
 ## Build and checks
 
-Rust 1.93 or newer is required by ZenJPEG.
+Rust 1.93 or newer is required by ZenJPEG. Git is required to fetch the pinned
+source fix. Cargo uses Git's CLI transport; the first fetch also downloads
+ZenJPEG's nested reference-code submodules, even though ig-prep does not compile
+their C++ tools. Later locked builds use Cargo's cache.
 
 ```sh
 cargo build --release --locked

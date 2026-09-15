@@ -697,8 +697,7 @@ dependencies = [
 [[package]]
 name = "zenjpeg"
 version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fc00260b76e859d71f31ceab888e6691508569e69ed6eeed3a42ef9791cfd7f"
+source = "git+https://github.com/oddharsh/zenjpeg?rev=d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63#d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63"
 dependencies = [
  "aligned-vec",
  "archmage",
