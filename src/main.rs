@@ -33,12 +33,12 @@ FIT
 
 OPTIONS
     -w, --width <px>   target width (default 1440)
-    -q <1-100>         JPEG quality (default 95)
+    -q <1-100>         ZenJPEG quality (default 99; differs from older exports)
     --444              full chroma resolution (default)
     --422              chroma halved horizontally
     --420              chroma halved on both axes
-    --dither           experimental dither at final 8-bit quantization
-    --variants         write eight variants (1080/1440, q90/95, 444/420),
+    --dither           experimental neutral noise before JPEG encoding
+    --variants         write eight variants (1080/1440, q95/99, 444/420),
                        references and a manifest to a NEW --out directory;
                        use --crop or --pad for out-of-band sources
     --pad-color <hex>  fill for --pad (default ffffff)
@@ -107,7 +107,7 @@ fn main() {
     let mut args = std::env::args().skip(1).peekable();
     let (mut paths, mut fit, mut gravity) = (Vec::new(), Fit::Full, Gravity::Center);
     let mut width = geometry::TARGET_WIDTH;
-    let (mut quality, mut chroma, mut dry) = (95u8, Chroma::Full, false);
+    let (mut quality, mut chroma, mut dry) = (encode::DEFAULT_QUALITY, Chroma::Full, false);
     let mut check = false;
     let mut dither = false;
     let mut variants = false;
@@ -399,7 +399,7 @@ impl Opts {
             fit: Fit::Full,
             gravity: Gravity::Center,
             width: geometry::TARGET_WIDTH,
-            quality: 95,
+            quality: encode::DEFAULT_QUALITY,
             chroma: Chroma::Full,
             dither: false,
             dry: false,

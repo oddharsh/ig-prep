@@ -22,13 +22,15 @@ platform decoder's profile and sample depth. JPEG XL travels through PNG.
 The TIFF reader supports strips and tiles, and retains 16-bit samples.
 
 Rotation, cropping, Lanczos3 resizing and padding operate on linear samples.
-The encoder applies the sRGB transfer function and quantizes to 8-bit once,
-immediately before JPEG encoding. Colours outside the sRGB gamut clip at export.
+ZenJPEG receives floating-point linear sRGB directly and applies the sRGB transfer
+function internally, preserving fractional samples through its transform.
+The output is a standard 8-bit JPEG. Colours outside the sRGB gamut clip at export.
 Alpha is discarded, as in previous versions; this tool targets opaque photographs.
 
-`--dither` adds deterministic, neutral noise of at most half an 8-bit step before
-rounding. It is off by default. Compare returned skies and smooth gradients
-before choosing it; JPEG recompression may remove its benefit.
+`--dither` adds deterministic, neutral noise of at most half an 8-bit sRGB step
+before encoding. It is off by default. The former explicit 8-bit rounding pass
+has been removed, including when this option is enabled. Compare returned skies
+and smooth gradients before choosing it; JPEG recompression may remove its benefit.
 
 **HDR policy:** the output is SDR. Detected PQ/HLG colour descriptions are refused
 with a request for an SDR export whose highlights you have reviewed. This avoids
@@ -45,10 +47,57 @@ The default `--full` keeps the complete frame at up to 1440 pixels wide.
 inside the requested width: a 2:3 portrait at width 1440 becomes a 1440×1920
 canvas containing a 1280×1920 photograph. Source pixels never enlarge.
 
-Defaults remain **1440 pixels, quality 95, 4:4:4 chroma**. These are a baseline
+Defaults are **1440 pixels, ZenJPEG quality 99, 4:4:4 chroma**. These are a baseline
 for comparison. Matching dimensions does not guarantee that Instagram skips
 resampling, and repeated chroma subsampling does not necessarily halve resolution
 again. Upload clients and served renditions need to be measured.
+
+## JPEG encoder
+
+The encoder is **ZenJPEG 0.8.4**, pinned to match the site's JPEG stack:
+
+- Standard YCbCr JPEG with an embedded sRGB ICC profile.
+- Adaptive quantization and hybrid trellis optimization via `auto_optimize(true)`.
+  ZenJPEG enables the hybrid optimizer within its supported quality range.
+- Progressive scan search, selected after `auto_optimize` because that call resets
+  the scan mode. Optimized Huffman coding and deringing retain upstream defaults.
+- Floating-point input throughout; no intermediate 8-bit RGB conversion.
+
+SharpYUV remains disabled. In ZenJPEG 0.8.4 its subsampling path assumes byte
+samples and corrupts floating-point input. The standard float conversion and
+downsampling path handles `--422` and `--420`; default `--444` retains every
+chroma sample. A decoded-colour regression test covers all three modes.
+
+`-q` now uses ZenJPEG's approximate jpegli quality scale. Equal numbers do not
+mean equal quality or file size across encoders. The default changes from the
+old encoder's q95 to ZenJPEG q99. Existing JPEGs are untouched
+until you explicitly convert their sources again. `--dither` now adds noise
+without rounding pixels to 8-bit first.
+
+A local comparison used six photographs at width 1440 with identical 16-bit sRGB
+PNG references and 4:4:4 sampling. Means from libjxl 0.11.1:
+
+| Encoder setting | SSIMULACRA2 ↑ | Butteraugli ↓ | Bytes per image |
+| --- | ---: | ---: | ---: |
+| Previous encoder q95 | 87.96 | 1.302 | 1,365,264 |
+| Previous encoder q98 | 91.37 | 0.767 | 2,010,767 |
+| JPEGli distance 0.15, progressive | 91.50 | 0.594 | 1,977,809 |
+| ZenJPEG q99, default | 91.63 | 0.555 | 1,885,407 |
+| ZenJPEG q100 | 92.46 | 0.526 | 2,405,402 |
+
+ZenJPEG q99 improved both metrics over the old default on all six images.
+Against old q98, it improved SSIMULACRA2 on five and Butteraugli on all six,
+with smaller files throughout. JPEGli omitted the standard ICC profile and was
+interpreted as sRGB by the metrics. These are local comparisons at the listed
+settings, not equal-size encodes or Instagram round trips. Q100 is available
+when the additional file size is acceptable.
+
+Progressive scans improve JPEG packing and partial loading. They do not restore
+detail lost during resizing or establish that Instagram will skip recompression.
+A [2023 study](https://informationsecurity.uibk.ac.at/pdfs/HB2023_IHMMSEC.pdf)
+observed distinct progressive scan scripts in Instagram images. That historical
+observation does not specify today's upload pipeline, quantization tables or
+crop/resize order. Matching those would require measured upload/return pairs.
 
 ## Measure an Instagram round trip
 
@@ -59,9 +108,13 @@ ig-prep --variants --crop -o comparison ~/Pictures/selects
 ig-prep score comparison
 ```
 
-Each source produces eight variants: 1080/1440 width × quality 90/95 × 4:4:4/4:2:0.
-The directory also contains a manifest and a 16-bit sRGB PNG reference for each
-source. Use a new output directory for every experiment. `--variants` refuses
+Each source produces eight variants: 1080/1440 width × ZenJPEG quality 95/99 ×
+4:4:4/4:2:0. The quality pair changes with this encoder migration so the experiment
+includes the new default.
+The directory also contains a manifest identifying the encoder recipe and a
+16-bit sRGB PNG reference for each source. Older manifests remain readable;
+their absent encoder identifier means unspecified, not the current encoder.
+Use a new output directory for every experiment. `--variants` refuses
 existing directories, dry runs and overrides of its fixed encoder settings.
 Choose `--crop` or `--pad` for sources outside the ratio band.
 
@@ -159,6 +212,8 @@ interpret.
 
 ## Build and checks
 
+Rust 1.93 or newer is required by ZenJPEG.
+
 ```sh
 cargo build --release --locked
 cargo test --release --locked
@@ -177,4 +232,11 @@ Conversions use at most two workers to bound memory while processing large
 floating-point frames. Earlier speed measurements predate colour management
 and should be remeasured before making performance claims.
 
-MIT licensed. Bundled ICC profiles are CC0; see [profiles/README.md](profiles/README.md).
+## Licensing
+
+The ig-prep source retains its MIT licensing. The pinned ZenJPEG dependency
+declares `AGPL-3.0-only OR LicenseRef-Imazen-Commercial`; see its
+[crate metadata and license files](https://crates.io/crates/zenjpeg/0.8.4).
+Builds containing ZenJPEG include those dependency terms and must not be
+represented as MIT-only. No commercial license is supplied by this repository.
+Bundled ICC profiles are CC0; see [profiles/README.md](profiles/README.md).

@@ -48,7 +48,7 @@ pub fn generate(files: &[PathBuf], opts: &Opts) -> Result<PathBuf, String> {
         for width in [1080, 1440] {
             let plan = geometry::plan(img.w, img.h, opts.fit, opts.gravity, width);
             let rendered = crate::render(&img, &plan, opts.pad)?;
-            for quality in [90, 95] {
+            for quality in [95, encode::DEFAULT_QUALITY] {
                 for chroma in [Chroma::Full, Chroma::Quartered] {
                     let name = format!(
                         "s{:04}-w{width}-q{quality}-{}.jpg",
@@ -63,7 +63,7 @@ pub fn generate(files: &[PathBuf], opts: &Opts) -> Result<PathBuf, String> {
             }
         }
     }
-    let manifest = json!({"version":1,"fit":format!("{:?}",opts.fit).to_lowercase(),"gravity":format!("{:?}",opts.gravity).to_lowercase(),"pad_color":opts.pad,"variants":entries});
+    let manifest = json!({"version":1,"encoder_profile":encode::PROFILE,"fit":format!("{:?}",opts.fit).to_lowercase(),"gravity":format!("{:?}",opts.gravity).to_lowercase(),"pad_color":opts.pad,"variants":entries});
     let dest = opts.out_dir.join("manifest.json");
     std::fs::write(
         &dest,
@@ -259,8 +259,14 @@ mod tests {
         opts.out_dir = temp.path().join("experiment");
         let path = generate(std::slice::from_ref(&source), &opts).unwrap();
         let manifest: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(manifest["encoder_profile"], encode::PROFILE);
         let entries = manifest["variants"].as_array().unwrap();
         assert_eq!(entries.len(), 8);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["quality"] == encode::DEFAULT_QUALITY)
+        );
         assert_eq!(
             std::fs::read_dir(opts.out_dir.join("uploads"))
                 .unwrap()

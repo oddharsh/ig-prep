@@ -337,13 +337,13 @@ fn tools() -> Value {
                             named after its source stem.",
         }),
     );
-    convert_props.insert("dither".into(), json!({"type":"boolean", "default":false, "description":"Experimental deterministic dither at final 8-bit quantization. Compare returned Instagram images before enabling by default."}));
+    convert_props.insert("dither".into(), json!({"type":"boolean", "default":false, "description":"Experimental deterministic neutral noise before JPEG encoding. Compare returned Instagram images before enabling by default."}));
     convert_props.insert(
         "quality".into(),
         json!({
-            "type": "integer", "minimum": 1, "maximum": 100, "default": 95,
-            "description": "JPEG quality. High by default because Instagram re-encodes whatever \
-                            it receives, and every pre-compression pass compounds with that one.",
+            "type": "integer", "minimum": 1, "maximum": 100, "default": crate::encode::DEFAULT_QUALITY,
+            "description": "ZenJPEG quality on its approximate jpegli scale, different from older ig-prep exports. \
+                            Higher values retain more detail at larger file sizes. Output is progressive sRGB JPEG.",
         }),
     );
     convert_props.insert(
@@ -998,7 +998,7 @@ mod tests {
         assert_eq!(o.fit, Fit::Full);
         assert_eq!(o.gravity, Gravity::Center);
         let c = convert_opts(&json!({}), None).unwrap();
-        assert_eq!(c.quality, 95);
+        assert_eq!(c.quality, crate::encode::DEFAULT_QUALITY);
         assert!(!c.dither);
         assert!(convert_opts(&json!({"dither":true}), None).unwrap().dither);
         assert!(convert_opts(&json!({"dither":"yes"}), None).is_err());

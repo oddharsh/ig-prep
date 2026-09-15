@@ -2,6 +2,7 @@
 name = "ig-prep"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.93"
 
 [dependencies]
 bytemuck = "1"
@@ -10,7 +11,8 @@ bytemuck = "1"
 # when working on both at once.
 exif-sooc = { git = "https://github.com/oddharsh/exif-sooc" }
 fast_image_resize = "6"
-jpeg-encoder = "0.6"
+# Match the measured site encoder. Review output and licensing on upgrades.
+zenjpeg = { version = "=0.8.4", features = ["trellis"] }
 moxcms = { version = "0.8.1", features = ["extended_range"] }
 png = "0.17"
 tempfile = "3"
@@ -22,3 +24,7 @@ tiff = { version = "0.11.3", default-features = false }
 # is deliberately off: the server works in `Value` and pulls no proc-macro.
 serde_json = "1"
 zune-jpeg = "0.4"
+
+[dev-dependencies]
+# Independent JPEG fixtures for decoder tests; not a production encoder.
+jpeg-encoder = "0.6"
