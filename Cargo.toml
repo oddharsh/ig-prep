@@ -19,12 +19,16 @@ png = "0.17"
 tempfile = "3"
 # Decode the lossless sips intermediate, including tiled 16-bit TIFF.
 tiff = { version = "0.11.3", default-features = false }
+# Source JPEG decoder. zune-jpeg 0.4 rejects a progressive scan whose length is
+# a multiple of the restart interval, which is the shape of this tool's own
+# exports (fixed upstream in 0.5.13). Single-threaded: rayon saves a fifth of a
+# 24MP decode and costs a dozen crates.
+jpeg-decoder = { version = "0.3", default-features = false }
 # JSON-RPC needs a real JSON reader. Hand-rolling one to save a dependency
 # means hand-rolling string escapes and unicode, which is exactly where a
 # hand-rolled parser goes quietly wrong on a path containing a quote. Derive
 # is deliberately off: the server works in `Value` and pulls no proc-macro.
 serde_json = "1"
-zune-jpeg = "0.4"
 
 [dev-dependencies]
 # Independent JPEG fixtures for decoder tests; not a production encoder.

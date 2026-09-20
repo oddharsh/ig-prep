@@ -116,9 +116,10 @@ mod tests {
         let img = Rgb::new(33, 19, px);
         for chroma in [Chroma::Full, Chroma::Halved, Chroma::Quartered] {
             let bytes = jpeg(&img, 98, chroma, false).unwrap();
-            let mut decoder = zune_jpeg::JpegDecoder::new(&bytes);
+            let mut decoder = jpeg_decoder::Decoder::new(&bytes[..]);
             let decoded = decoder.decode().unwrap();
-            assert_eq!(decoder.dimensions(), Some((33, 19)));
+            let info = decoder.info().unwrap();
+            assert_eq!((info.width, info.height), (33, 19));
             assert_eq!(decoder.icc_profile().unwrap(), crate::color::SRGB_ICC);
             let sof = bytes.windows(2).position(|p| p == [0xff, 0xc2]).unwrap();
             assert_eq!(bytes[sof + 4], 8, "standard 8-bit JPEG precision");
@@ -214,7 +215,10 @@ mod tests {
         for q in [1, 100] {
             let bytes = jpeg(&img, q, Chroma::Full, false).unwrap();
             assert_eq!(
-                zune_jpeg::JpegDecoder::new(&bytes).decode().unwrap().len(),
+                jpeg_decoder::Decoder::new(&bytes[..])
+                    .decode()
+                    .unwrap()
+                    .len(),
                 3
             );
         }
