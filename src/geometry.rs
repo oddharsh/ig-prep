@@ -11,9 +11,12 @@ pub const MAX_LANDSCAPE: f64 = 1.91;
 /// Tallest frame Instagram shows without cropping (3:4).
 pub const MIN_PORTRAIT: f64 = 0.75;
 
-/// Baseline width. Compare 1080 and 1440 via --variants before assuming a
-/// particular upload client or served rendition preserves these dimensions.
-pub const TARGET_WIDTH: u32 = 1440;
+/// Delivery width. Measured in September 2026 on real posts: Instagram served
+/// uploads at their own width, unchanged, up to 3072 for single posts and
+/// carousel items alike, and reduced full-resolution uploads to 3072x4096.
+/// Whether that cap is 3072 wide or 4096 tall is untested on frames other
+/// than 3:4.
+pub const TARGET_WIDTH: u32 = 3072;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {

@@ -12,10 +12,10 @@
 //! then disagrees with the documentation; here `Opts::defaults()` is the CLI's
 //! defaults, and a caller who sets no arguments gets exactly `ig-prep <dir>`.
 //!
-//! WHAT IT DELIBERATELY DOES NOT DO: return image bytes. A converted 1440px
-//! frame is a few hundred kilobytes, which is a megabyte of base64 in a tool
-//! result, and a model that asked to convert forty photographs does not want
-//! forty megabytes of them in its context. The files are on disk, where the
+//! WHAT IT DELIBERATELY DOES NOT DO: return image bytes. A converted 3072px
+//! frame is several megabytes, more again as base64 in a tool result, and a
+//! model that asked to convert forty photographs does not want hundreds of
+//! megabytes of them in its context. The files are on disk, where the
 //! caller can already reach them, so the result carries paths and sizes.
 //!
 //! ## Transport
@@ -202,8 +202,9 @@ Prepares photographs for Instagram's compression, on this machine. Name paths \
 to files or directories; converted JPEGs are written to disk and the result \
 reports paths and sizes rather than image bytes. Start with ig_plan to see \
 what a conversion would do, then ig_convert to do it. The default delivers the \
-whole frame at up to 1440px wide so the framing choice stays in the Instagram \
-app. Matching width does not guarantee that Instagram skips resampling. \
+whole frame at up to 3072px wide so the framing choice stays in the Instagram \
+app; Instagram served that width unchanged when measured in September 2026, \
+which is evidence rather than a guarantee that it skips resampling. \
 Outputs are colour-managed SDR sRGB JPEGs; detected PQ/HLG input requires a \
 reviewed SDR export first.";
 
@@ -314,10 +315,10 @@ fn geometry_props(map: &mut Map<String, Value>) {
             "type": "integer",
             "minimum": 1,
             "maximum": 16384,
-            "default": 1440,
-            "description": "Target delivery width in pixels. 1440 is a deliberate guess rather \
-                            than a measured fact. Compare 1080 and 1440 on your upload path. \
-                            Padding counts towards this limit. Source pixels never enlarge.",
+            "default": 3072,
+            "description": "Target delivery width in pixels. In September 2026 Instagram served \
+                            uploads at their own width up to 3072 and reduced larger ones to \
+                            3072x4096. Padding counts towards this limit. Source pixels never enlarge.",
         }),
     );
 }

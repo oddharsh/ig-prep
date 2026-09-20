@@ -42,13 +42,17 @@ The ratio band is **3:4 through 1.91:1**. Instagram announced 3:4 support in
 [May 2025](https://www.threads.com/@mosseri/post/DKOIbJkRNIb).
 A 2:3 camera portrait still needs cropping or padding to fit.
 
-The default `--full` keeps the complete frame at up to 1440 pixels wide.
+The default `--full` keeps the complete frame at up to 3072 pixels wide.
 `--crop` chooses the nearest ratio in the band. `--pad` includes the borders
-inside the requested width: a 2:3 portrait at width 1440 becomes a 1440×1920
-canvas containing a 1280×1920 photograph. Source pixels never enlarge.
+inside the requested width: a 2:3 portrait at width 3072 becomes a 3072×4096
+canvas containing a 2731×4096 photograph. Source pixels never enlarge.
 
-Defaults are **1440 pixels, ZenJPEG quality 99, 4:4:4 chroma**. These are a baseline
-for comparison. Matching dimensions does not guarantee that Instagram skips
+Defaults are **3072 pixels, ZenJPEG quality 99, 4:4:4 chroma**. The width follows
+a September 2026 measurement of real posts: Instagram served uploads at their own
+width up to 3072, for single posts and carousel items alike, and reduced
+full-resolution uploads to 3072×4096. Whether that cap is a width or a 4096 long
+edge is untested on frames other than 3:4, and the earlier 1440 default predates
+the measurement. Matching dimensions still does not guarantee that Instagram skips
 resampling, and repeated chroma subsampling does not necessarily halve resolution
 again. Upload clients and served renditions need to be measured.
 

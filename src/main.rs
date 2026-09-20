@@ -32,7 +32,7 @@ FIT
     --gravity <center|top|bottom>   where --crop takes its window
 
 OPTIONS
-    -w, --width <px>   target width (default 1440)
+    -w, --width <px>   target width (default 3072)
     -q <1-100>         ZenJPEG quality (default 99; differs from older exports)
     --444              full chroma resolution (default)
     --422              chroma halved horizontally
