@@ -56,6 +56,28 @@ the measurement. Matching dimensions still does not guarantee that Instagram ski
 resampling, and repeated chroma subsampling does not necessarily halve resolution
 again. Upload clients and served renditions need to be measured.
 
+## Choose the window here
+
+Cropping in the app costs detail. On a September 2026 post the app's crop of a
+3072×4608 upload was a resample, 4098.2 source rows squeezed into 4096, so the
+phase drifted across the frame: the served image kept 71% of the upload's
+Laplacian energy overall and 86% in one band through the middle. The window it
+chooses has a fractional height because it is drawn in screen points.
+
+`--pick` moves that choice onto this machine:
+
+```sh
+ig-prep --pick -o ig ~/Pictures/selects
+```
+
+It opens one page in the default browser, served from a loopback socket by
+this process, one photograph at a time. Drag the window, pick 3:4, 4:5, 1:1
+or a landscape ratio, zoom if you must (never past the target width, so
+nothing enlarges), and export. The export is a whole-pixel window inside the
+band, delivered at the target width through the same resize and encode as
+every other conversion, so the app has nothing left to crop. Leave the framing
+untouched in the app; any adjustment there reintroduces the resample.
+
 ## JPEG encoder
 
 The encoder is **ZenJPEG 0.8.4**, using the site's JPEG stack with a

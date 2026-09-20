@@ -11,6 +11,7 @@ mod geometry;
 mod heif;
 mod image;
 mod mcp;
+mod pick;
 mod simulate;
 
 use encode::Chroma;
@@ -31,6 +32,10 @@ FIT
     --crop        crop to Instagram's nearest allowed ratio here instead
     --pad         pad to it, keeping the whole frame
     --gravity <center|top|bottom>   where --crop takes its window
+    --pick        choose the window here, in your browser, one photograph
+                  at a time. The export is a whole-pixel, in-band window at
+                  the target width, so the app has nothing to resample. The
+                  fit flags are ignored; -o, -w, -q and chroma apply.
 
 OPTIONS
     -w, --width <px>   target width (default 3072)
@@ -124,6 +129,7 @@ fn main() {
     let mut check = false;
     let mut dither = false;
     let mut variants = false;
+    let mut pick = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
 
@@ -140,6 +146,7 @@ fn main() {
             "--check" => check = true,
             "--dither" => dither = true,
             "--variants" => variants = true,
+            "--pick" => pick = true,
             "--gravity" => {
                 gravity = match args.next().as_deref() {
                     Some("top") => Gravity::Top,
@@ -192,6 +199,12 @@ fn main() {
         );
         std::process::exit(2);
     }
+    if pick && (check || dry || variants) {
+        eprintln!(
+            "ig-prep: --pick chooses the framing interactively; it cannot combine with --check, --dry-run or --variants"
+        );
+        std::process::exit(2);
+    }
     let files = expand(&paths);
     if files.is_empty() {
         eprintln!("ig-prep: no readable images");
@@ -220,6 +233,9 @@ fn main() {
         out_dir: out_dir.clone(),
     };
 
+    if pick {
+        std::process::exit(pick::run(&files, &opts));
+    }
     if variants {
         match comparison::generate(&files, &opts) {
             Ok(path) => println!("Comparison written to {}", path.display()),
