@@ -11,6 +11,7 @@ mod geometry;
 mod heif;
 mod image;
 mod mcp;
+mod simulate;
 
 use encode::Chroma;
 use geometry::{Fit, Gravity};
@@ -55,6 +56,15 @@ COMPARISON
                   upload filenames, then score against the lossless references.
                   Scoring supports the same image formats as conversion.
 
+SIMULATE
+    ig-prep simulate [-o <dir>] <PATH>...
+                  Re-encode JPEG uploads the way Instagram's servers did when
+                  measured in September 2026: its quantisation tables, 4:2:0,
+                  progressive. Writes <name>.ig.jpg to <dir> (default ./ig-sim)
+                  and reports the PSNR against each upload. Refuses uploads
+                  wider than the 3072 tier, whose downscale is not modelled,
+                  and does not model the app's crop.
+
 MCP SERVER
     ig-prep mcp [--root <dir>]
                   Speak MCP on stdin and stdout, so a model with file access
@@ -82,6 +92,9 @@ fn main() {
             }
         }
         return;
+    }
+    if argv.first().map(String::as_str) == Some("simulate") {
+        std::process::exit(run_simulate(&argv[1..]));
     }
     if argv.first().map(String::as_str) == Some("mcp") {
         let mut root = None;
@@ -224,6 +237,75 @@ fn main() {
     if reports.iter().any(|r| r.error.is_some()) {
         std::process::exit(1);
     }
+}
+
+/// `ig-prep simulate`: the servers' encode, applied locally to uploads.
+///
+/// Directories expand the same way as for conversion, but only JPEGs are
+/// simulated: the tool models what the servers do to an upload, and an
+/// upload is a JPEG this tool wrote. Anything else is named and skipped
+/// rather than silently dropped, so a directory of sources does not read as
+/// a finished run.
+fn run_simulate(args: &[String]) -> i32 {
+    let mut out_dir = PathBuf::from("ig-sim");
+    let mut paths = Vec::new();
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                return 0;
+            }
+            "-o" | "--out" => match rest.next() {
+                Some(d) => out_dir = PathBuf::from(d),
+                None => {
+                    eprintln!("ig-prep simulate: --out needs a directory");
+                    return 2;
+                }
+            },
+            s if s.starts_with('-') => {
+                eprintln!("ig-prep simulate: unknown option {s}");
+                return 2;
+            }
+            s => paths.push(PathBuf::from(s)),
+        }
+    }
+    if paths.is_empty() {
+        eprintln!("Usage: ig-prep simulate [-o <dir>] <PATH>...");
+        return 2;
+    }
+    let is_jpeg = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+    };
+    let (files, skipped): (Vec<PathBuf>, Vec<PathBuf>) =
+        expand(&paths).into_iter().partition(|p| is_jpeg(p));
+    for s in &skipped {
+        eprintln!(
+            "{}: skipped, simulate reads JPEG uploads; convert first",
+            s.display()
+        );
+    }
+    if files.is_empty() {
+        eprintln!("ig-prep simulate: no JPEG uploads");
+        return 1;
+    }
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("ig-prep: {}: {e}", out_dir.display());
+        return 1;
+    }
+    let mut failed = false;
+    for f in &files {
+        match simulate::one(f, &out_dir) {
+            Ok(s) => println!("{}", s.line()),
+            Err(e) => {
+                failed = true;
+                eprintln!("{}: {e}", f.display());
+            }
+        }
+    }
+    if failed { 1 } else { 0 }
 }
 
 /// Convert a batch across the available cores, in input order.

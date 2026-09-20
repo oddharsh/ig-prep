@@ -149,7 +149,39 @@ Inspect framing yourself: a same-ratio crop cannot be detected from dimensions.
 
 The metrics supplement visual inspection. Inspect the full-size returns too:
 normalizing to a common size hides any extra detail in higher-resolution images.
-There is no Instagram encoder simulation, and generating variants uploads nothing.
+Generating variants uploads nothing. `ig-prep simulate` below previews the
+servers' encode from measured facts, and is no substitute for a real return.
+
+## Preview the servers' encode
+
+`ig-prep simulate` re-encodes an upload the way Instagram's servers did when
+measured in September 2026, so the damage can be seen before posting:
+
+```sh
+ig-prep -o ig ~/Pictures/selects
+ig-prep simulate -o ig-sim ig
+```
+
+Sixteen served renditions from two accounts, with HQ upload on, shared one recipe:
+the upload's own width up to 3072, 4:2:0 chroma, progressive scans, optimised
+Huffman tables, no ICC profile, and one pair of quantisation tables (luma 2 to 13,
+chroma the IJG standard table at about quality 94). The simulation applies those
+tables through the common libjpeg chain, triangle chroma upsampling on decode and
+2×2 averaging on encode, and writes `<name>.ig.jpg` with the PSNR against the
+upload. On four photographs at 1080 wide it agrees with a libjpeg-turbo encode of
+the same tables to within 48 to 53 dB and reproduces that chain's SSIMULACRA2 to
+0.1. Instagram's exact filters remain unknown, and one measured recipe is a
+snapshot rather than a contract.
+
+It does not model the app's crop, which measured as a 1:1 cut at a fractional
+vertical offset, nor the downscale applied to uploads wider than 3072, which
+measured soft. Uploads wider than the tier are refused rather than guessed at.
+
+The simulation settles the chroma question. After the servers' 4:2:0, a 4:4:4
+upload scored SSIMULACRA2 85.3 and Butteraugli 1.67 against the lossless
+reference, and a SharpYUV 4:2:0 upload 84.4 and 2.12, on the same four
+photographs at 1080 wide. Subsampling once, at the end, beats subsampling twice,
+so 4:4:4 stays the default.
 
 ## Point a model at it
 
