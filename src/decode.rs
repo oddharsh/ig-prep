@@ -1,5 +1,11 @@
 //! Decode at source precision, then colour-manage every format into linear sRGB.
 //! HEIF uses macOS sips; JPEG XL uses djxl. Their intermediates retain profiles.
+//!
+//! JPEG goes through jpeg-decoder rather than zune-jpeg. zune-jpeg 0.4 rejects
+//! a progressive scan whose length is a multiple of the restart interval, and
+//! ZenJPEG's exports at Instagram sizes are exactly that shape, so the tool
+//! could not read its own output. jpeg-decoder matches libjpeg-turbo to within
+//! one level on those files. Upstream fixed zune-jpeg in 0.5.13.
 
 use crate::{color, image::Rgb};
 use moxcms::ColorProfile;
@@ -31,22 +37,27 @@ pub fn open(path: &Path) -> Result<Decoded, String> {
 }
 
 fn jpeg(bytes: &[u8]) -> Result<Rgb, String> {
-    use zune_jpeg::zune_core::{colorspace::ColorSpace, options::DecoderOptions};
-    let mut d = zune_jpeg::JpegDecoder::new(bytes);
-    d.set_options(DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB));
-    let px = d.decode().map_err(|e| format!("jpeg: {e:?}"))?;
-    let (w, h) = d.dimensions().ok_or("jpeg: no dimensions")?;
-    // A grayscale JPEG may remain Luma despite requesting RGB.
-    let channels = match d.get_output_colorspace().ok_or("jpeg: no colourspace")? {
-        ColorSpace::RGB => 3,
-        ColorSpace::RGBA => 4,
-        ColorSpace::Luma => 1,
-        ColorSpace::LumaA => 2,
-        other => return Err(format!("jpeg: unsupported colourspace {other:?}")),
+    use jpeg_decoder::{Decoder, PixelFormat};
+    let mut d = Decoder::new(bytes);
+    let px = d.decode().map_err(|e| format!("jpeg: {e}"))?;
+    let info = d.info().ok_or("jpeg: no image info")?;
+    // YCbCr and RGB-coded frames both arrive as RGB; only CMYK and 16-bit
+    // lossless keep their own layout, and neither is a camera format.
+    let channels = match info.pixel_format {
+        PixelFormat::RGB24 => 3,
+        PixelFormat::L8 => 1,
+        other => return Err(format!("jpeg: unsupported sample format {other:?}")),
     };
     let icc = d.icc_profile();
     let source = color::profile(icc.as_deref())?;
-    color::convert(w as u32, h as u32, &px, channels, 255.0, &source)
+    color::convert(
+        info.width.into(),
+        info.height.into(),
+        &px,
+        channels,
+        255.0,
+        &source,
+    )
 }
 
 fn png_profile(info: &png::Info<'_>) -> Result<ColorProfile, String> {
@@ -281,6 +292,93 @@ mod tests {
         for (&got, expected) in jpg.px.iter().zip(tagged.px) {
             assert!((got - expected).abs() < 0.01);
         }
+    }
+
+    /// A scan whose length is a multiple of the restart interval ends flush
+    /// with its final interval, and T.81 figure B.2 puts no RST marker after
+    /// that one. zune-jpeg 0.4 rejected the layout as "Marker SOS found in
+    /// bitstream", so the two fixtures below are the regression guard.
+    #[test]
+    fn progressive_scan_ending_on_a_restart_interval_decodes() {
+        // 16x8 at 4:4:4 is two data units per scan; an interval of one MCU
+        // makes every scan end on an interval boundary.
+        let px: Vec<u8> = (0..16 * 8)
+            .flat_map(|i| [(i % 16) as u8 * 12 + 30, (i / 16) as u8 * 20 + 40, 160])
+            .collect();
+        let mut bytes = Vec::new();
+        let mut enc = jpeg_encoder::Encoder::new(&mut bytes, 95);
+        enc.set_progressive(true);
+        enc.set_restart_interval(1);
+        enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
+        enc.encode(&px, 16, 8, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        assert!(
+            bytes.windows(2).any(|p| p == [0xff, 0xdd]),
+            "no DRI segment"
+        );
+        assert!(
+            bytes
+                .windows(2)
+                .any(|p| p[0] == 0xff && (0xd0..=0xd7).contains(&p[1])),
+            "no RST markers"
+        );
+        let img = jpeg(&bytes).unwrap();
+        assert_eq!((img.w, img.h), (16, 8));
+        for (i, (&linear, &expected)) in img.px.iter().zip(&px).enumerate() {
+            let got = color::linear_to_srgb(linear) * 255.0;
+            assert!(
+                (got - f32::from(expected)).abs() < 8.0,
+                "sample {i}: decoded {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn own_export_at_a_realistic_size_reads_back() {
+        // 1440x960 at 4:4:4 is 180x120 data units. ZenJPEG restarts every four
+        // rows of them, and 720 divides 21600, which is the shape that failed.
+        let (w, h) = (1440u32, 960u32);
+        let mut px = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let mut n = (y * w + x).wrapping_mul(0x9e3779b9);
+                n ^= n >> 15;
+                let noise = (n & 0xff) as f32 / 255.0 * 0.01 - 0.005;
+                px.extend([
+                    0.05 + 0.7 * x as f32 / w as f32 + noise,
+                    0.05 + 0.7 * y as f32 / h as f32 + noise,
+                    0.3 + noise,
+                ]);
+            }
+        }
+        let img = Rgb::new(w, h, px);
+        let bytes = crate::encode::jpeg(&img, 95, crate::encode::Chroma::Full, false).unwrap();
+        let dri = bytes
+            .windows(2)
+            .position(|p| p == [0xff, 0xdd])
+            .map(|i| u16::from_be_bytes([bytes[i + 4], bytes[i + 5]]))
+            .expect("the export defines a restart interval");
+        assert_eq!(
+            (w / 8 * (h / 8)) % u32::from(dri),
+            0,
+            "the fixture only guards the regression while every scan is a whole number of intervals"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("export.jpg");
+        std::fs::write(&path, &bytes).unwrap();
+        let decoded = open(&path).unwrap();
+        assert!(!decoded.orientation_applied);
+        assert_eq!((decoded.img.w, decoded.img.h), (w, h));
+        let (mut worst, mut total) = (0.0f32, 0.0f64);
+        for (&got, &expected) in decoded.img.px.iter().zip(&img.px) {
+            let d = (color::linear_to_srgb(got) - color::linear_to_srgb(expected)).abs() * 255.0;
+            worst = worst.max(d);
+            total += f64::from(d);
+        }
+        let mean = total / img.px.len() as f64;
+        // Measured 5.8 and 0.76 at the time of writing; a dropped or shifted
+        // row would push the worst sample past 40.
+        assert!(worst < 12.0 && mean < 1.5, "worst {worst}, mean {mean}");
     }
 
     #[test]
