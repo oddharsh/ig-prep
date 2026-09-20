@@ -71,12 +71,17 @@ ig-prep --pick -o ig ~/Pictures/selects
 ```
 
 It opens one page in the default browser, served from a loopback socket by
-this process, one photograph at a time. Drag the window, pick 3:4, 4:5, 1:1
+this process, one photograph at a time. The next photograph decodes while the
+current one is on screen, and each export runs in the background once its
+window is posted, at most two at a time; only the last one makes the page
+wait. Drag the window, pick 3:4, 4:5, 1:1
 or a landscape ratio, zoom if you must (never past the target width, so
 nothing enlarges), and export. The export is a whole-pixel window inside the
 band, delivered at the target width through the same resize and encode as
-every other conversion, so the app has nothing left to crop. Leave the framing
-untouched in the app; any adjustment there reintroduces the resample.
+every other conversion, so the app has nothing left to crop. The tab closes
+itself after the last export or a quit; a browser that refuses says so on the
+page instead. Leave the framing untouched in the app; any adjustment there
+reintroduces the resample.
 
 ## JPEG encoder
 

@@ -477,6 +477,7 @@ fn run_check(files: &[PathBuf]) -> i32 {
     }
 }
 
+#[derive(Clone)]
 pub struct Opts {
     pub fit: Fit,
     pub gravity: Gravity,

@@ -16,14 +16,19 @@
 
 use crate::{Opts, encode, geometry, image};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Longest edge of the preview the browser gets. Enough to place a window;
 /// the export uses the frame this process already decoded.
 const PREVIEW_EDGE: u32 = 1600;
+/// Exports that may run at once. Each holds a decoded frame, so this bounds
+/// memory as well as cores, like the converter's two workers.
+const EXPORTS_IN_FLIGHT: usize = 2;
 const HEADER_LIMIT: usize = 64 * 1024;
 const BODY_LIMIT: usize = 64 * 1024;
 
@@ -64,13 +69,28 @@ struct Outcome {
 }
 
 /// Serve the picker until every file is exported, skipped or the page quits.
+///
+/// Choosing a window takes longer than decoding or encoding a frame, so
+/// neither waits on the other: the next photograph decodes on a thread
+/// while the current one is on screen, and each export runs on a thread of
+/// its own once the window is posted. Only the last export makes the page
+/// wait, because nothing else is left to choose.
 fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Outcome, String> {
     let mut failed = false;
     let mut i = 0;
     let mut current: Option<Current> = None;
+    let mut preload: Option<(usize, JoinHandle<Result<Current, String>>)> = None;
+    let mut exports: VecDeque<Export> = VecDeque::new();
     while i < files.len() {
         if current.is_none() {
-            match Current::load(&files[i]) {
+            let loaded = match preload.take() {
+                Some((j, handle)) if j == i => handle
+                    .join()
+                    .map_err(|_| "decode thread panicked".to_string())
+                    .and_then(|r| r),
+                _ => Current::load(&files[i]),
+            };
+            match loaded {
                 Ok(c) => current = Some(c),
                 Err(e) => {
                     eprintln!("{}: {e}", files[i].display());
@@ -79,6 +99,10 @@ fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Out
                     continue;
                 }
             }
+        }
+        if preload.is_none() && i + 1 < files.len() {
+            let path = files[i + 1].clone();
+            preload = Some((i + 1, std::thread::spawn(move || Current::load(&path))));
         }
         let cur = current.as_ref().ok_or("no photograph loaded")?;
         let (mut stream, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
@@ -114,21 +138,34 @@ fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Out
                         continue;
                     }
                 };
-                let (ok, line) = match export(cur, &files[i], window, opts) {
-                    Ok(line) => {
-                        println!("{line}");
-                        (true, line)
-                    }
-                    Err(e) => {
-                        eprintln!("{}: {e}", files[i].display());
-                        failed = true;
-                        (false, format!("{}: {e}", files[i].display()))
-                    }
-                };
+                let frame = current.take().ok_or("no photograph loaded")?;
+                let path = files[i].clone();
+                let opts = opts.clone();
+                while exports.len() >= EXPORTS_IN_FLIGHT {
+                    finish_one(&mut exports, &mut failed);
+                }
+                exports.push_back(Export {
+                    path: path.clone(),
+                    handle: std::thread::spawn(move || export(&frame, &path, window, &opts)),
+                });
                 i += 1;
-                current = None;
-                let body =
-                    json!({"ok": ok, "advanced": true, "next": i < files.len(), "line": line});
+                let last = i >= files.len();
+                let (ok, line) = if last {
+                    let done = finish_all(&mut exports, &mut failed);
+                    (done.1 == 0, summary(done))
+                } else {
+                    (
+                        true,
+                        format!(
+                            "{}: exporting in the background",
+                            files[i - 1]
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        ),
+                    )
+                };
+                let body = json!({"ok": ok, "advanced": true, "next": !last, "line": line});
                 respond(
                     &mut stream,
                     200,
@@ -141,8 +178,14 @@ fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Out
                 println!("{line}");
                 i += 1;
                 current = None;
-                let body =
-                    json!({"ok": true, "advanced": true, "next": i < files.len(), "line": line});
+                let last = i >= files.len();
+                let line = if last {
+                    let done = finish_all(&mut exports, &mut failed);
+                    format!("{line}; {}", summary(done))
+                } else {
+                    line
+                };
+                let body = json!({"ok": true, "advanced": true, "next": !last, "line": line});
                 respond(
                     &mut stream,
                     200,
@@ -151,7 +194,8 @@ fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Out
                 )?;
             }
             ("POST", "/quit") => {
-                let body = json!({"ok": true, "advanced": false, "next": false, "line": "stopped"});
+                let done = finish_all(&mut exports, &mut failed);
+                let body = json!({"ok": true, "advanced": false, "next": false, "line": format!("stopped; {}", summary(done))});
                 respond(
                     &mut stream,
                     200,
@@ -166,7 +210,56 @@ fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Out
             _ => respond(&mut stream, 404, "text/plain", b"not found")?,
         }
     }
+    finish_all(&mut exports, &mut failed);
     Ok(Outcome { failed, left: 0 })
+}
+
+/// An export running on its own thread, holding the frame it needs.
+struct Export {
+    path: PathBuf,
+    handle: JoinHandle<Result<String, String>>,
+}
+
+/// Wait for the oldest export and report it, in file order. Returns whether
+/// it succeeded.
+fn finish_one(exports: &mut VecDeque<Export>, failed: &mut bool) -> Option<bool> {
+    let Export { path, handle } = exports.pop_front()?;
+    match handle.join() {
+        Ok(Ok(line)) => {
+            println!("{line}");
+            Some(true)
+        }
+        Ok(Err(e)) => {
+            eprintln!("{}: {e}", path.display());
+            *failed = true;
+            Some(false)
+        }
+        Err(_) => {
+            eprintln!("{}: export thread panicked", path.display());
+            *failed = true;
+            Some(false)
+        }
+    }
+}
+
+/// Wait for every export; the count of (exported, failed) in this batch.
+fn finish_all(exports: &mut VecDeque<Export>, failed: &mut bool) -> (usize, usize) {
+    let mut done = (0, 0);
+    while let Some(ok) = finish_one(exports, failed) {
+        if ok {
+            done.0 += 1;
+        } else {
+            done.1 += 1;
+        }
+    }
+    done
+}
+
+fn summary((exported, failed): (usize, usize)) -> String {
+    match failed {
+        0 => format!("{exported} exported"),
+        n => format!("{exported} exported, {n} failed, see the terminal"),
+    }
 }
 
 /// The photograph on screen: the decoded frame, kept for the export, and a
@@ -483,7 +576,12 @@ function send(path) {
     .then(r => r.json()).then(j => {
       st.textContent = j.line;
       if (j.advanced && j.next) setTimeout(() => location.reload(), 600);
-      else if (j.advanced || path === '/quit') st.textContent = j.line + ' · done, you can close this tab';
+      else if (j.advanced || path === '/quit') {
+        // The tab was opened for this page, so the page may close it. A
+        // browser that refuses leaves the line below as the fallback.
+        st.textContent = j.line + ' \u00b7 done';
+        setTimeout(() => { window.close(); st.textContent = j.line + ' \u00b7 done, you can close this tab'; }, 800);
+      }
       else for (const b of document.querySelectorAll('button')) b.disabled = false;
     }).catch(e => { st.textContent = 'ig-prep has stopped: ' + e; });
 }
@@ -552,6 +650,10 @@ mod tests {
         assert!(html.contains("INBAND=false"));
         assert!(html.contains("a&lt;b&gt;&amp;&quot;c.jpg"));
         assert!(html.contains("3 of 5"));
+        assert!(
+            html.contains("window.close()"),
+            "the tab closes itself when done"
+        );
         assert!(
             html.split('%')
                 .skip(1)
@@ -660,6 +762,79 @@ mod tests {
             (96, 128),
             "3:4 window at native size, never enlarged"
         );
+    }
+
+    /// Two photographs: the first export returns at once and runs behind the
+    /// second choice; the last export makes the page wait for everything.
+    #[test]
+    fn exports_run_in_the_background_until_the_last_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for (name, tint) in [("one.png", 60u8), ("two.png", 180u8)] {
+            let src = dir.path().join(name);
+            let mut px = Vec::new();
+            for y in 0..144u32 {
+                for x in 0..96u32 {
+                    px.extend([(x * 255 / 95) as u8, tint, (y * 255 / 143) as u8]);
+                }
+            }
+            let mut info = png::Info::with_size(96, 144);
+            info.color_type = png::ColorType::Rgb;
+            info.bit_depth = png::BitDepth::Eight;
+            png::Encoder::with_info(
+                std::io::BufWriter::new(std::fs::File::create(&src).unwrap()),
+                info,
+            )
+            .unwrap()
+            .write_header()
+            .unwrap()
+            .write_image_data(&px)
+            .unwrap();
+            files.push(src);
+        }
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut opts = Opts::defaults();
+        opts.out_dir = out_dir.clone();
+        let server = std::thread::spawn(move || session(&listener, &files, &opts).unwrap());
+        let talk = |req: String| -> Value {
+            let mut c = TcpStream::connect(addr).unwrap();
+            c.write_all(req.as_bytes()).unwrap();
+            let mut resp = Vec::new();
+            c.read_to_end(&mut resp).unwrap();
+            let body = &resp[find(&resp, b"\r\n\r\n").unwrap() + 4..];
+            serde_json::from_slice(body)
+                .unwrap_or_else(|_| json!({"html": String::from_utf8_lossy(body)}))
+        };
+        let window = r#"{"x":0,"y":8,"w":96,"h":128}"#;
+        let post = format!(
+            "POST /crop HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{window}",
+            window.len()
+        );
+        let first = talk(post.clone());
+        assert_eq!(first["next"], true);
+        assert!(
+            first["line"]
+                .as_str()
+                .unwrap()
+                .contains("exporting in the background"),
+            "{first}"
+        );
+        let page = talk("GET / HTTP/1.1\r\nHost: x\r\n\r\n".into());
+        assert!(
+            page["html"].as_str().unwrap().contains("2 of 2"),
+            "the second photograph is on screen"
+        );
+        let last = talk(post);
+        assert_eq!(last["next"], false);
+        assert_eq!(last["line"], "2 exported", "{last}");
+        let outcome = server.join().unwrap();
+        assert!(!outcome.failed && outcome.left == 0);
+        for name in ["one.jpg", "two.jpg"] {
+            assert_eq!(dims(&std::fs::read(out_dir.join(name)).unwrap()), (96, 128));
+        }
     }
 
     fn dims(bytes: &[u8]) -> (u16, u16) {
