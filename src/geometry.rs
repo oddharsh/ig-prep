@@ -11,9 +11,12 @@ pub const MAX_LANDSCAPE: f64 = 1.91;
 /// Tallest frame Instagram shows without cropping (3:4).
 pub const MIN_PORTRAIT: f64 = 0.75;
 
-/// Baseline width. Compare 1080 and 1440 via --variants before assuming a
-/// particular upload client or served rendition preserves these dimensions.
-pub const TARGET_WIDTH: u32 = 1440;
+/// Delivery width. Measured in September 2026 on real posts: Instagram served
+/// uploads at their own width, unchanged, up to 3072 for single posts and
+/// carousel items alike, and reduced full-resolution uploads to 3072x4096.
+/// Whether that cap is 3072 wide or 4096 tall is untested on frames other
+/// than 3:4.
+pub const TARGET_WIDTH: u32 = 3072;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
@@ -128,9 +131,86 @@ pub fn plan(w: u32, h: u32, fit: Fit, gravity: Gravity, target_width: u32) -> Pl
     }
 }
 
+/// Tolerance on a hand-chosen window's ratio, so integer rounding at the
+/// band's edges (a 3:4 window of 5152 wide is 6869 rows, 0.75004) passes.
+const RATIO_TOLERANCE: f64 = 0.002;
+
+/// A window chosen by hand, in display pixels, delivered at the target width.
+///
+/// The window has to be inside the band because the whole point is that the
+/// app then has nothing to crop, and inside the frame because there is
+/// nothing to pad it with. Source pixels never enlarge, as everywhere else.
+pub fn plan_window(
+    w: u32,
+    h: u32,
+    window: (u32, u32, u32, u32),
+    target_width: u32,
+) -> Result<Plan, String> {
+    let (x, y, cw, ch) = window;
+    if cw == 0 || ch == 0 {
+        return Err("window must have a width and a height".into());
+    }
+    if x.checked_add(cw).is_none_or(|r| r > w) || y.checked_add(ch).is_none_or(|b| b > h) {
+        return Err(format!(
+            "window {cw}x{ch} at {x},{y} falls outside the {w}x{h} frame"
+        ));
+    }
+    let ratio = cw as f64 / ch as f64;
+    if !(MIN_PORTRAIT - RATIO_TOLERANCE..=MAX_LANDSCAPE + RATIO_TOLERANCE).contains(&ratio) {
+        return Err(format!(
+            "window ratio {ratio:.4} is outside Instagram's band ({MIN_PORTRAIT} to {MAX_LANDSCAPE})"
+        ));
+    }
+    let scale_w = target_width.min(cw);
+    let scale_h = ((scale_w as f64) / ratio).round().max(1.0) as u32;
+    Ok(Plan {
+        crop: window,
+        scale: (scale_w, scale_h),
+        canvas: (scale_w, scale_h),
+        offset: (0, 0),
+        ratio,
+        outside_band: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hand_chosen_window_lands_on_exact_tier_dimensions() {
+        // The full width of a 2:3 portrait at 3:4, 4:5 and 1:1.
+        for (ch, expect) in [(6869, 4096), (6440, 3840), (5152, 3072)] {
+            let p = plan_window(5152, 7728, (0, 400, 5152, ch), 3072).unwrap();
+            assert_eq!(p.scale, (3072, expect));
+            assert_eq!(p.canvas, p.scale, "never padded");
+            assert!(!p.outside_band);
+        }
+        // Zoomed in to exactly the tier width: delivered as is, never enlarged.
+        let p = plan_window(5152, 7728, (1000, 1000, 3072, 4096), 3072).unwrap();
+        assert_eq!(p.scale, (3072, 4096));
+        let p = plan_window(5152, 7728, (0, 0, 1536, 2048), 3072).unwrap();
+        assert_eq!(p.scale, (1536, 2048));
+        // A landscape frame that already fits is its own window.
+        let p = plan_window(7728, 5152, (0, 0, 7728, 5152), 3072).unwrap();
+        assert_eq!(p.scale, (3072, 2048));
+    }
+
+    #[test]
+    fn a_window_outside_the_frame_or_the_band_is_refused() {
+        assert!(plan_window(5152, 7728, (1, 0, 5152, 6869), 3072).is_err());
+        assert!(plan_window(5152, 7728, (0, 1000, 5152, 6869), 3072).is_err());
+        assert!(plan_window(5152, 7728, (0, 0, 0, 10), 3072).is_err());
+        assert!(
+            plan_window(5152, 7728, (0, 0, 5152, 7728), 3072).is_err(),
+            "2:3 is too tall"
+        );
+        assert!(
+            plan_window(7728, 5152, (0, 0, 7728, 3000), 3072).is_err(),
+            "wider than 1.91:1"
+        );
+        assert!(plan_window(5152, 7728, (0, 0, u32::MAX, 10), 3072).is_err());
+    }
 
     /// This verifies geometry, not Instagram's upload implementation.
     #[test]

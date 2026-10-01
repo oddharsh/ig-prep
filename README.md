@@ -42,15 +42,46 @@ The ratio band is **3:4 through 1.91:1**. Instagram announced 3:4 support in
 [May 2025](https://www.threads.com/@mosseri/post/DKOIbJkRNIb).
 A 2:3 camera portrait still needs cropping or padding to fit.
 
-The default `--full` keeps the complete frame at up to 1440 pixels wide.
+The default `--full` keeps the complete frame at up to 3072 pixels wide.
 `--crop` chooses the nearest ratio in the band. `--pad` includes the borders
-inside the requested width: a 2:3 portrait at width 1440 becomes a 1440×1920
-canvas containing a 1280×1920 photograph. Source pixels never enlarge.
+inside the requested width: a 2:3 portrait at width 3072 becomes a 3072×4096
+canvas containing a 2731×4096 photograph. Source pixels never enlarge.
 
-Defaults are **1440 pixels, ZenJPEG quality 99, 4:4:4 chroma**. These are a baseline
-for comparison. Matching dimensions does not guarantee that Instagram skips
+Defaults are **3072 pixels, ZenJPEG quality 99, 4:4:4 chroma**. The width follows
+a September 2026 measurement of real posts: Instagram served uploads at their own
+width up to 3072, for single posts and carousel items alike, and reduced
+full-resolution uploads to 3072×4096. Whether that cap is a width or a 4096 long
+edge is untested on frames other than 3:4, and the earlier 1440 default predates
+the measurement. Matching dimensions still does not guarantee that Instagram skips
 resampling, and repeated chroma subsampling does not necessarily halve resolution
 again. Upload clients and served renditions need to be measured.
+
+## Choose the window here
+
+Cropping in the app costs detail. On a September 2026 post the app's crop of a
+3072×4608 upload was a resample, 4098.2 source rows squeezed into 4096, so the
+phase drifted across the frame: the served image kept 71% of the upload's
+Laplacian energy overall and 86% in one band through the middle. The window it
+chooses has a fractional height because it is drawn in screen points.
+
+`--pick` moves that choice onto this machine:
+
+```sh
+ig-prep --pick -o ig ~/Pictures/selects
+```
+
+It opens one page in the default browser, served from a loopback socket by
+this process, one photograph at a time. The next photograph decodes while the
+current one is on screen, and each export runs in the background once its
+window is posted, at most two at a time; only the last one makes the page
+wait. Drag the window, pick 3:4, 4:5, 1:1
+or a landscape ratio, zoom if you must (never past the target width, so
+nothing enlarges), and export. The export is a whole-pixel window inside the
+band, delivered at the target width through the same resize and encode as
+every other conversion, so the app has nothing left to crop. The tab closes
+itself after the last export or a quit; a browser that refuses says so on the
+page instead. Leave the framing untouched in the app; any adjustment there
+reintroduces the resample.
 
 ## JPEG encoder
 
@@ -155,7 +186,39 @@ ig-prep score --local --perceptual comparison
 
 The metrics supplement visual inspection. Inspect the full-size returns too:
 normalizing to a common size hides any extra detail in higher-resolution images.
-There is no Instagram encoder simulation, and generating variants uploads nothing.
+Generating variants uploads nothing. `ig-prep simulate` below previews the
+servers' encode from measured facts, and is no substitute for a real return.
+
+## Preview the servers' encode
+
+`ig-prep simulate` re-encodes an upload the way Instagram's servers did when
+measured in September 2026, so the damage can be seen before posting:
+
+```sh
+ig-prep -o ig ~/Pictures/selects
+ig-prep simulate -o ig-sim ig
+```
+
+Sixteen served renditions from two accounts, with HQ upload on, shared one recipe:
+the upload's own width up to 3072, 4:2:0 chroma, progressive scans, optimised
+Huffman tables, no ICC profile, and one pair of quantisation tables (luma 2 to 13,
+chroma the IJG standard table at about quality 94). The simulation applies those
+tables through the common libjpeg chain, triangle chroma upsampling on decode and
+2×2 averaging on encode, and writes `<name>.ig.jpg` with the PSNR against the
+upload. On four photographs at 1080 wide it agrees with a libjpeg-turbo encode of
+the same tables to within 48 to 53 dB and reproduces that chain's SSIMULACRA2 to
+0.1. Instagram's exact filters remain unknown, and one measured recipe is a
+snapshot rather than a contract.
+
+It does not model the app's crop, which measured as a 1:1 cut at a fractional
+vertical offset, nor the downscale applied to uploads wider than 3072, which
+measured soft. Uploads wider than the tier are refused rather than guessed at.
+
+The simulation settles the chroma question. After the servers' 4:2:0, a 4:4:4
+upload scored SSIMULACRA2 85.3 and Butteraugli 1.67 against the lossless
+reference, and a SharpYUV 4:2:0 upload 84.4 and 2.12, on the same four
+photographs at 1080 wide. Subsampling once, at the end, beats subsampling twice,
+so 4:4:4 stays the default.
 
 ## Inspect local detail
 
