@@ -6,6 +6,7 @@
 mod color;
 mod comparison;
 mod decode;
+mod diagnostics;
 mod encode;
 mod geometry;
 mod heif;
@@ -48,9 +49,15 @@ OPTIONS
                        nothing. Exits non-zero if any do.
     -h, --help
 
+DETAIL DIAGNOSTICS
+    ig-prep diagnose [-w <px>] [--detail x,y,w,h] -o <NEW-directory> <file>
+                  Compare Q99/Q100 with same-size lossless references and metrics.
+                  Detail rectangle uses oriented source pixels; writes companion crops.
+                  Requires ssimulacra2 and butteraugli_main on PATH.
+
 COMPARISON
     ig-prep --variants --crop -o comparison <PATH>...
-    ig-prep score comparison
+    ig-prep score [--local] [--perceptual] comparison
                   Download served images into comparison/returned/ with their
                   upload filenames, then score against the lossless references.
                   Scoring supports the same image formats as conversion.
@@ -69,12 +76,28 @@ fn main() {
     // option loop because everything below parses arguments for a conversion
     // this process is not going to perform.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("diagnose") {
+        match diagnostics::run(&argv[1..]) {
+            Ok(path) => println!("Diagnostics written to {}", path.display()),
+            Err(e) => {
+                eprintln!("ig-prep: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if argv.first().map(String::as_str) == Some("score") {
-        if argv.len() != 2 {
-            eprintln!("Usage: ig-prep score <comparison-directory>");
+        let local = argv.iter().any(|a| a == "--local");
+        let perceptual = argv.iter().any(|a| a == "--perceptual");
+        let paths: Vec<_> = argv[1..]
+            .iter()
+            .filter(|a| !matches!(a.as_str(), "--local" | "--perceptual"))
+            .collect();
+        if paths.len() != 1 || paths[0].starts_with('-') {
+            eprintln!("Usage: ig-prep score [--local] [--perceptual] <comparison-directory>");
             std::process::exit(2);
         }
-        match comparison::score(Path::new(&argv[1])) {
+        match comparison::score_with(Path::new(paths[0]), local, perceptual) {
             Ok(report) => println!("{report}"),
             Err(e) => {
                 eprintln!("ig-prep: {e}");

@@ -124,7 +124,7 @@ Each source produces eight variants: 1080/1440 width × ZenJPEG quality 95/99 ×
 4:4:4/4:2:0. The quality pair changes with this encoder migration so the experiment
 includes the new default.
 The directory also contains a manifest identifying the encoder recipe and a
-16-bit sRGB PNG reference for each source. Older manifests remain readable;
+16-bit sRGB PNG reference for each source at each tested width. Older manifests remain readable;
 their absent encoder identifier means unspecified, not the current encoder.
 Use a new output directory for every experiment. `--variants` refuses
 existing directories, dry runs and overrides of its fixed encoder settings.
@@ -139,13 +139,39 @@ and intermediary exports introduce another image-processing step. Scoring
 supports the converter's input formats; WebP returns need a supported rendition.
 
 The scorer reports missing files, served dimensions, RGB RMSE and local 8×8
-luminance SSIM. It normalizes each source group to the smallest returned width,
-capped at 1080, and rejects changed aspect ratios. Compare scores within a group.
+luminance SSIM. It normalizes each reference group to the smallest returned width,
+capped at that reference's width, and rejects changed aspect ratios.
+1440-wide returns retain their resolution when all returns in their group are
+at least 1440 pixels wide. Compare encoder settings within the same reference group.
 Inspect framing yourself: a same-ratio crop cannot be detected from dimensions.
+
+Add `--perceptual` for SSIMULACRA2 and Butteraugli scores. Both `ssimulacra2`
+and `butteraugli_main` from libjxl must be on PATH. Add `--local` to score the
+files in `uploads/` before an Instagram round trip:
+
+```sh
+ig-prep score --local --perceptual comparison
+```
 
 The metrics supplement visual inspection. Inspect the full-size returns too:
 normalizing to a common size hides any extra detail in higher-resolution images.
 There is no Instagram encoder simulation, and generating variants uploads nothing.
+
+## Inspect local detail
+
+```sh
+ig-prep diagnose -w 1440 --detail 600,400,800,600 -o detail-check photo.jpg
+```
+
+`diagnose` writes Q99/Q100 JPEGs, same-size lossless references, perceptual scores
+and an `index.html` with previews enlarged 2×. It requires the same libjxl metric tools
+and a new output directory. Open the HTML to inspect edges and texture alongside the scores.
+
+The optional detail rectangle uses oriented source pixels. It produces a separate
+detail export as well as a preview of that region in the full-frame export.
+Source pixels never enlarge. Compare Q99 and Q100 within each export size;
+scores across full-frame and detail exports measure different content.
+Q100 remains lossy, and these local measurements do not predict Instagram recompression.
 
 ## Point a model at it
 

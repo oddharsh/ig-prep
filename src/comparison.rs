@@ -42,12 +42,11 @@ pub fn generate(files: &[PathBuf], opts: &Opts) -> Result<PathBuf, String> {
                 path.display()
             ));
         }
-        let reference_name = format!("s{:04}.png", index + 1);
-        let reference = crate::render(&img, &reference_plan, opts.pad)?;
-        write_reference(&refs.join(&reference_name), &reference)?;
         for width in [1080, 1440] {
             let plan = geometry::plan(img.w, img.h, opts.fit, opts.gravity, width);
             let rendered = crate::render(&img, &plan, opts.pad)?;
+            let reference_name = format!("s{:04}-w{width}.png", index + 1);
+            write_reference(&refs.join(&reference_name), &rendered)?;
             for quality in [95, encode::DEFAULT_QUALITY] {
                 for chroma in [Chroma::Full, Chroma::Quartered] {
                     let name = format!(
@@ -71,11 +70,11 @@ pub fn generate(files: &[PathBuf], opts: &Opts) -> Result<PathBuf, String> {
     )
     .map_err(|e| e.to_string())?;
     std::fs::write(opts.out_dir.join("README.txt"),
-        "Upload each file in uploads/ with identical framing and upload settings. Record app/version, upload quality setting, date, and post type in your notes. Download the actual served image (not a screenshot) into returned/ using its matching upload filename. Do not convert it first. Run: ig-prep score <this-directory>. Missing returns are reported. Metrics use the lossless 1080-wide reference, normalizing each source group to the smallest returned width (at most 1080), and report actual served dimensions. Compare results within a source group. Inspect full-size returns too: scores at a common size cannot capture a higher-resolution rendition's extra detail. Repeat uploads to distinguish settings from server variability. HDR/gain-map and WebP returns are not supported. Keep filenames even if a JPEG or AVIF response has a different extension.\n").map_err(|e| e.to_string())?;
+        "Upload each file in uploads/ with identical framing and upload settings. Record app/version, upload quality setting, date, and post type in your notes. Download the actual served image (not a screenshot) into returned/ using its matching upload filename. Do not convert it first. Run: ig-prep score --perceptual <this-directory>. For local encoder measurements use: ig-prep score --local --perceptual <this-directory>. Missing returns are reported. Metrics use a lossless reference at each tested width, normalizing each reference group to its smallest returned width, and report actual served dimensions. Compare results within a source group. Inspect full-size returns too: scores at a common size cannot capture a higher-resolution rendition's extra detail. Repeat uploads to distinguish settings from server variability. HDR/gain-map and WebP returns are not supported. Keep filenames even if a JPEG or AVIF response has a different extension.\n").map_err(|e| e.to_string())?;
     Ok(dest)
 }
 
-fn write_reference(path: &Path, img: &Rgb) -> Result<(), String> {
+pub(crate) fn write_reference(path: &Path, img: &Rgb) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut info = png::Info::with_size(img.w, img.h);
     info.color_type = png::ColorType::Rgb;
@@ -110,7 +109,14 @@ fn local_file(root: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(test)]
 pub fn score(dir: &Path) -> Result<String, String> {
+    score_with(dir, false, false)
+}
+
+pub fn score_with(dir: &Path, local: bool, perceptual: bool) -> Result<String, String> {
+    let folder = if local { "uploads" } else { "returned" };
+    let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(dir.join("manifest.json")).map_err(|e| e.to_string())?,
     )
@@ -136,12 +142,16 @@ pub fn score(dir: &Path) -> Result<String, String> {
     let mut report = String::from(
         "file\tserved\tcompared\tRGB RMSE (0-255; lower better)\t8x8 luma SSIM (higher better)\n",
     );
+    if perceptual {
+        report = report.trim_end().to_owned()
+            + "\tSSIMULACRA2 (higher better)\tButteraugli (lower better)\n";
+    }
     let mut count = 0;
     for (reference_name, group) in groups {
         let reference =
             crate::decode::open(&local_file(&dir.join("references"), &reference_name)?)?.img;
         let mut returns = Vec::new();
-        let mut width = reference.w.min(1080);
+        let mut width = reference.w;
         for e in group {
             let name = e["file"].as_str().ok_or("missing return filename")?;
             // Validate before existence testing, including for missing entries.
@@ -153,11 +163,11 @@ pub fn score(dir: &Path) -> Result<String, String> {
             {
                 return Err("invalid return filename".into());
             }
-            if !dir.join("returned").join(name).exists() {
+            if !dir.join(folder).join(name).exists() {
                 writeln!(report, "{name}\tMISSING").unwrap();
                 continue;
             }
-            let image = crate::load_oriented(&local_file(&dir.join("returned"), name)?)?;
+            let image = crate::load_oriented(&local_file(&dir.join(folder), name)?)?;
             let expected_h = image.w as f64 * reference.h as f64 / reference.w as f64;
             if (image.h as f64 - expected_h).abs() > 1.5 {
                 return Err(format!(
@@ -174,9 +184,19 @@ pub fn score(dir: &Path) -> Result<String, String> {
         for (name, returned) in returns {
             let normalized = image::resize(&returned, width, height)?;
             let (rmse, ssim) = metrics(&reference, &normalized);
+            let extra = if perceptual {
+                let a = temp.path().join("reference.png");
+                let b = temp.path().join("candidate.png");
+                write_reference(&a, &reference)?;
+                write_reference(&b, &normalized)?;
+                let (s, b) = perceptual_metrics(&a, &b)?;
+                format!("\t{s:.6}\t{b:.6}")
+            } else {
+                String::new()
+            };
             writeln!(
                 report,
-                "{name}\t{}x{}\t{width}x{height}\t{rmse:.4}\t{ssim:.6}",
+                "{name}\t{}x{}\t{width}x{height}\t{rmse:.4}\t{ssim:.6}{extra}",
                 returned.w, returned.h
             )
             .unwrap();
@@ -227,6 +247,36 @@ fn metrics(reference: &Rgb, returned: &Rgb) -> (f64, f64) {
     (rmse, sum / blocks as f64)
 }
 
+/// Run libjxl's metric tools with explicit arguments, never through a shell.
+/// Reference and candidate must already have matching dimensions and colour space.
+pub(crate) fn perceptual_metrics(reference: &Path, candidate: &Path) -> Result<(f64, f64), String> {
+    fn run(tool: &str, reference: &Path, candidate: &Path) -> Result<f64, String> {
+        let result = std::process::Command::new(tool)
+            .arg(reference)
+            .arg(candidate)
+            .output()
+            .map_err(|e| {
+                format!("{tool} is required for perceptual scoring (install libjxl tools): {e}")
+            })?;
+        if !result.status.success() {
+            return Err(format!(
+                "{tool} failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+        let text = String::from_utf8_lossy(&result.stdout);
+        text.lines()
+            .next()
+            .and_then(|line| line.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("{tool}: invalid metric output"))
+    }
+    Ok((
+        run("ssimulacra2", reference, candidate)?,
+        run("butteraugli_main", reference, candidate)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +312,20 @@ mod tests {
         assert_eq!(manifest["encoder_profile"], encode::PROFILE);
         let entries = manifest["variants"].as_array().unwrap();
         assert_eq!(entries.len(), 8);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e["reference"] == "s0001-w1080.png")
+                .count(),
+            4
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e["reference"] == "s0001-w1440.png")
+                .count(),
+            4
+        );
         assert!(
             entries
                 .iter()
@@ -287,5 +351,81 @@ mod tests {
             "never overwrite an experiment"
         );
         assert!(local_file(&opts.out_dir, "../source.png").is_err());
+    }
+
+    #[test]
+    fn scoring_preserves_resolution_and_normalizes_only_within_reference_groups() {
+        let temp = tempfile::tempdir().unwrap();
+        for folder in ["references", "uploads", "returned"] {
+            std::fs::create_dir(temp.path().join(folder)).unwrap();
+        }
+        let large = Rgb::new(1440, 32, vec![0.25; 1440 * 32 * 3]);
+        let small = image::resize(&large, 1080, 24).unwrap();
+        for (folder, name, img) in [
+            ("references", "large.png", &large),
+            ("references", "small.png", &small),
+            ("uploads", "large.png", &large),
+            ("uploads", "small.png", &small),
+            ("returned", "large.png", &large),
+            ("returned", "small.png", &small),
+        ] {
+            write_reference(&temp.path().join(folder).join(name), img).unwrap();
+        }
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "variants": [
+                    {"file": "large.png", "reference": "large.png"},
+                    {"file": "small.png", "reference": "small.png"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for local in [false, true] {
+            let report = score_with(temp.path(), local, false).unwrap();
+            assert!(report.contains("large.png\t1440x32\t1440x32\t0.0000\t1.000000"));
+            assert!(report.contains("small.png\t1080x24\t1080x24\t0.0000\t1.000000"));
+        }
+
+        // A smaller rendition in the same group sets that group's common size.
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "variants": [
+                    {"file": "large.png", "reference": "large.png"},
+                    {"file": "small.png", "reference": "large.png"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            score(temp.path())
+                .unwrap()
+                .contains("large.png\t1440x32\t1080x24\t")
+        );
+
+        // Legacy manifests share a 1080-wide reference across upload widths.
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "variants": [
+                    {"file": "large.png", "reference": "small.png"},
+                    {"file": "small.png", "reference": "small.png"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            score(temp.path())
+                .unwrap()
+                .contains("large.png\t1440x32\t1080x24\t")
+        );
     }
 }
