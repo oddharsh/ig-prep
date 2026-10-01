@@ -40,7 +40,41 @@ impl Chroma {
     }
 }
 
-pub fn jpeg(img: &Rgb, quality: u8, chroma: Chroma, dither: bool) -> Result<Vec<u8>, String> {
+/// The servers' own tables, written exactly, so each coefficient already sits
+/// on the grid the servers re-quantise to. Every rate-distortion tool is off:
+/// trellis, adaptive quantisation and deringing all move coefficients to save
+/// upload bytes, which the servers discard, and on 20 photographs at 3072 the
+/// trellis cost 0.4 SSIMULACRA2 after the servers. What remains is ZenJPEG's
+/// float input, rounded once onto the grid. Chroma stays 4:4:4 so the servers
+/// subsample once.
+pub fn jpeg_match(img: &Rgb) -> Result<Vec<u8>, String> {
+    use zenjpeg::encoder::{EncodingTables, PerComponent, QuantTableConfig, ScalingParams};
+    check(img)?;
+    let exact = |t: &[u16; 64]| t.map(f32::from);
+    let mut tables = EncodingTables::default_ycbcr();
+    tables.quant = PerComponent {
+        c0: exact(&crate::simulate::LUMA),
+        c1: exact(&crate::simulate::CHROMA),
+        c2: exact(&crate::simulate::CHROMA),
+    };
+    tables.scaling = ScalingParams::Exact;
+    tables.zero_bias_mul = PerComponent {
+        c0: [0.0; 64],
+        c1: [0.0; 64],
+        c2: [0.0; 64],
+    };
+    tables.zero_bias_offset_dc = [0.0; 3];
+    tables.zero_bias_offset_ac = [0.0; 3];
+    // The quality argument only steers tools that are switched off here.
+    let config = EncoderConfig::ycbcr(DEFAULT_QUALITY, ChromaSubsampling::None)
+        .quant_table_config(QuantTableConfig::Custom(Box::new(tables)))
+        .aq_enabled(false)
+        .deringing(false)
+        .scan_mode(ProgressiveScanMode::ProgressiveSearch);
+    finish(config, img, &export_pixels(img, false))
+}
+
+fn check(img: &Rgb) -> Result<(), String> {
     if img.w == 0 || img.h == 0 || img.w > 65535 || img.h > 65535 {
         return Err("JPEG dimensions must be 1..65535".into());
     }
@@ -50,6 +84,11 @@ pub fn jpeg(img: &Rgb, quality: u8, chroma: Chroma, dither: bool) -> Result<Vec<
     if samples != Some(img.px.len()) || img.px.iter().any(|c| !c.is_finite()) {
         return Err("JPEG requires a complete, finite RGB buffer".into());
     }
+    Ok(())
+}
+
+pub fn jpeg(img: &Rgb, quality: u8, chroma: Chroma, dither: bool) -> Result<Vec<u8>, String> {
+    check(img)?;
     if !(1..=100).contains(&quality) {
         return Err("JPEG quality must be 1..100".into());
     }
@@ -59,12 +98,16 @@ pub fn jpeg(img: &Rgb, quality: u8, chroma: Chroma, dither: bool) -> Result<Vec<
         .auto_optimize(true)
         .scan_mode(ProgressiveScanMode::ProgressiveSearch)
         .sharp_yuv(chroma != Chroma::Full);
+    finish(config, img, &pixels)
+}
+
+fn finish(config: EncoderConfig, img: &Rgb, pixels: &[f32]) -> Result<Vec<u8>, String> {
     let mut enc = config
         .request()
         .icc_profile(crate::color::SRGB_ICC)
         .encode_from_bytes(img.w, img.h, PixelLayout::RgbF32Linear)
         .map_err(|e| format!("encode: {e}"))?;
-    enc.push_packed(bytemuck::cast_slice(pixels.as_ref()), Unstoppable)
+    enc.push_packed(bytemuck::cast_slice(pixels), Unstoppable)
         .map_err(|e| format!("encode: {e}"))?;
     enc.finish().map_err(|e| format!("encode: {e}"))
 }
@@ -183,6 +226,66 @@ mod tests {
         assert!(srgb.iter().all(|v| (v - 127.25).abs() <= 0.5001));
         let mean = srgb.iter().map(|&v| v as f64).sum::<f64>() / srgb.len() as f64;
         assert!((mean - 127.25).abs() < 0.02, "{mean}");
+    }
+
+    #[test]
+    fn matched_encode_carries_the_servers_tables_at_444_with_a_profile() {
+        let mut px = Vec::new();
+        for y in 0..24 {
+            for x in 0..40 {
+                px.extend([
+                    crate::color::srgb_to_linear(0.2 + x as f32 / 60.0),
+                    0.3,
+                    crate::color::srgb_to_linear(0.9 - y as f32 / 40.0),
+                ]);
+            }
+        }
+        let img = Rgb::new(40, 24, px);
+        let bytes = jpeg_match(&img).unwrap();
+        let mut d = jpeg_decoder::Decoder::new(std::io::Cursor::new(&bytes));
+        let decoded = d.decode().unwrap();
+        let info = d.info().unwrap();
+        assert_eq!((info.width, info.height), (40, 24));
+        assert_eq!(d.icc_profile().as_deref(), Some(crate::color::SRGB_ICC));
+        let sof = bytes.windows(2).position(|p| p == [0xff, 0xc2]).unwrap();
+        assert_eq!(bytes[sof + 11], 0x11, "4:4:4: the servers subsample once");
+        // Every table, verbatim, from however many DQT segments carry them.
+        let mut tables = std::collections::BTreeMap::new();
+        let mut i = 2;
+        while i + 4 <= bytes.len() {
+            if bytes[i] != 0xff || bytes[i + 1] == 0xda {
+                if bytes[i + 1] == 0xda {
+                    break;
+                }
+                i += 1;
+                continue;
+            }
+            let len = ((bytes[i + 2] as usize) << 8) | bytes[i + 3] as usize;
+            if bytes[i + 1] == 0xdb {
+                let seg = &bytes[i + 4..i + 2 + len];
+                let mut p = 0;
+                while p + 65 <= seg.len() {
+                    let mut natural = [0u16; 64];
+                    for (k, &v) in seg[p + 1..p + 65].iter().enumerate() {
+                        natural[crate::simulate::ZIGZAG_TEST[k]] = v as u16;
+                    }
+                    tables.insert(seg[p] & 15, natural);
+                    p += 65;
+                }
+            }
+            i += 2 + len;
+        }
+        assert_eq!(tables.get(&0), Some(&crate::simulate::LUMA));
+        assert_eq!(tables.get(&1), Some(&crate::simulate::CHROMA));
+        assert_eq!(tables.get(&2), Some(&crate::simulate::CHROMA));
+        for (i, (&actual, &linear)) in decoded.iter().zip(&img.px).enumerate() {
+            let expected = crate::color::linear_to_srgb(linear) * 255.0;
+            assert!(
+                (actual as f32 - expected).abs() < 8.0,
+                "sample {i}: {actual} vs {expected}"
+            );
+        }
+        assert!(jpeg_match(&Rgb::new(1, 1, vec![f32::NAN; 3])).is_err());
     }
 
     #[test]

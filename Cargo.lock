@@ -703,7 +703,7 @@ dependencies = [
 [[package]]
 name = "zenjpeg"
 version = "0.8.4"
-source = "git+https://github.com/oddharsh/zenjpeg?rev=d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63#d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63"
+source = "git+https://github.com/oddharsh/zenjpeg?rev=62d72569a4d46638695fbd1d20ebd8ae635b5221#62d72569a4d46638695fbd1d20ebd8ae635b5221"
 dependencies = [
  "aligned-vec",
  "archmage",

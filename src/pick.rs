@@ -313,7 +313,7 @@ fn export(
 ) -> Result<String, String> {
     let plan = geometry::plan_window(cur.img.w, cur.img.h, window, opts.width)?;
     let final_img = crate::render(&cur.img, &plan, opts.pad)?;
-    let bytes = encode::jpeg(&final_img, opts.quality, opts.chroma, opts.dither)?;
+    let bytes = crate::encode_with(opts, &final_img)?;
     let dest = opts.out_dir.join(format!(
         "{}.jpg",
         path.file_stem().unwrap_or_default().to_string_lossy()
@@ -330,7 +330,7 @@ fn export(
         window.3,
         window.0,
         window.1,
-        opts.chroma.label(),
+        opts.encode_label(),
         bytes.len() / 1024
     ))
 }

@@ -359,6 +359,16 @@ fn tools() -> Value {
         }),
     );
     convert_props.insert(
+        "match".into(),
+        json!({
+            "type": "boolean",
+            "default": false,
+            "description": "Encode on Instagram's measured quantisation tables at 4:4:4, with \
+                            ZenJPEG's trellis off, so the servers re-quantise the upload close to \
+                            itself. About half the bytes; cannot combine with quality, chroma or dither.",
+        }),
+    );
+    convert_props.insert(
         "pad_color".into(),
         json!({
             "type": "string",
@@ -741,6 +751,16 @@ fn convert_opts(args: &Value, root: Option<&Path>) -> Result<Opts, String> {
             other => return Err(format!("chroma must be 444, 422 or 420, got {other:?}")),
         },
     }
+    if let Some(m) = args.get("match") {
+        o.match_tables = m.as_bool().ok_or("match must be a boolean")?;
+        if o.match_tables
+            && ["quality", "chroma", "dither"]
+                .iter()
+                .any(|k| args.get(*k).is_some())
+        {
+            return Err(crate::MATCH_CONFLICT.into());
+        }
+    }
     if let Some(c) = args.get("pad_color").and_then(Value::as_str) {
         let h = c.trim_start_matches('#');
         if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1021,6 +1041,30 @@ mod tests {
         assert!(convert_opts(&json!({ "chroma": "411" }), None).is_err());
         assert!(convert_opts(&json!({ "pad_color": "xyzxyz" }), None).is_err());
         assert!(convert_opts(&json!({ "pad_color": "fff" }), None).is_err());
+    }
+
+    /// `match` replaces quality, chroma and dither, so naming any of them
+    /// alongside it is refused rather than quietly overridden.
+    #[test]
+    fn match_is_offered_and_refuses_the_settings_it_replaces() {
+        assert!(!convert_opts(&json!({}), None).unwrap().match_tables);
+        assert!(
+            convert_opts(&json!({ "match": true }), None)
+                .unwrap()
+                .match_tables
+        );
+        assert!(convert_opts(&json!({ "match": "yes" }), None).is_err());
+        for clash in [
+            json!({"quality": 99}),
+            json!({"chroma": "444"}),
+            json!({"dither": false}),
+        ] {
+            let mut args = clash.clone();
+            args["match"] = json!(true);
+            assert!(convert_opts(&args, None).is_err(), "{clash}");
+            args["match"] = json!(false);
+            assert!(convert_opts(&args, None).is_ok(), "{clash}");
+        }
     }
 
     #[test]

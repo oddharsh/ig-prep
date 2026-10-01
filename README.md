@@ -86,7 +86,10 @@ reintroduces the resample.
 ## JPEG encoder
 
 The encoder is **ZenJPEG 0.8.4**, using the site's JPEG stack with a
-[pinned SharpYUV input fix](https://github.com/oddharsh/zenjpeg/commit/d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63):
+[pinned SharpYUV input fix](https://github.com/oddharsh/zenjpeg/commit/d7ec0944d1ab6a3f4e2dc25bbc3a11461529cd63).
+The pin sits one commit later, on a
+[re-export of the custom-table types](https://github.com/oddharsh/zenjpeg/commit/62d72569a4d46638695fbd1d20ebd8ae635b5221)
+that `--match` needs. The default path below doesn't touch them:
 
 - Standard YCbCr JPEG with an embedded sRGB ICC profile.
 - Adaptive quantization and hybrid trellis optimization via `auto_optimize(true)`.
@@ -213,6 +216,24 @@ snapshot rather than a contract.
 It does not model the app's crop, which measured as a 1:1 cut at a fractional
 vertical offset, nor the downscale applied to uploads wider than 3072, which
 measured soft. Uploads wider than the tier are refused rather than guessed at.
+
+The same tables can encode the upload itself. `--match` writes the servers'
+measured tables exactly, at 4:4:4, so each coefficient already sits on the grid
+the servers re-quantise to. It runs ZenJPEG with trellis, adaptive quantisation
+and deringing off: those tools move coefficients to save upload bytes, and the
+servers throw the upload bytes away. What remains is ZenJPEG's float input,
+rounded once onto Instagram's grid.
+
+On the 20 photographs of one post at 3072×4096, cropped to 3:4, `--match` beat
+q99 after the servers on every frame: SSIMULACRA2 85.35 against 85.11 (+0.12 to
++0.38 per frame) through a libjpeg-turbo model of the servers, and 85.32 against
+85.05 through `simulate`. The uploads were 56% of the q99 bytes and encoded in
+2.6 seconds instead of 4.5. The same tables with trellis on scored 0.4 below
+q99, and an 8-bit encoder (jpeg-encoder) on the same tables tied it. These are
+local models of the servers, not a round trip: a measured return should come
+before `--match` becomes the default. The tables are a September 2026 snapshot,
+so if Instagram changes them a matched upload is re-quantised like any other.
+`-q`, the chroma flags and `--dither` are refused alongside it.
 
 The simulation settles the chroma question. After the servers' 4:2:0, a 4:4:4
 upload scored SSIMULACRA2 85.3 and Butteraugli 1.67 against the lossless

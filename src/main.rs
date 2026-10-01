@@ -45,6 +45,11 @@ OPTIONS
     --422              chroma halved horizontally
     --420              chroma halved on both axes
     --dither           experimental neutral noise before JPEG encoding
+    --match            encode on the servers' own quantisation tables, as
+                       measured in September 2026, at 4:4:4 with no trellis:
+                       about half the bytes, faster, and slightly ahead of q99
+                       after the servers in local models. Cannot combine with
+                       -q, the chroma flags or --dither.
     --variants         write eight variants (1080/1440, q95/99, 444/420),
                        references and a manifest to a NEW --out directory;
                        use --crop or --pad for out-of-band sources
@@ -153,6 +158,7 @@ fn main() {
     let mut dither = false;
     let mut variants = false;
     let mut pick = false;
+    let mut match_tables = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
 
@@ -170,6 +176,7 @@ fn main() {
             "--dither" => dither = true,
             "--variants" => variants = true,
             "--pick" => pick = true,
+            "--match" => match_tables = true,
             "--gravity" => {
                 gravity = match args.next().as_deref() {
                     Some("top") => Gravity::Top,
@@ -213,13 +220,21 @@ fn main() {
             || argv.iter().any(|s| {
                 matches!(
                     s.as_str(),
-                    "-w" | "--width" | "-q" | "--444" | "--422" | "--420"
+                    "-w" | "--width" | "-q" | "--444" | "--422" | "--420" | "--match"
                 )
             }))
     {
         eprintln!(
             "ig-prep: --variants uses fixed width, quality and chroma values; it cannot combine with --check or --dry-run"
         );
+        std::process::exit(2);
+    }
+    if match_tables
+        && argv
+            .iter()
+            .any(|s| matches!(s.as_str(), "-q" | "--444" | "--422" | "--420" | "--dither"))
+    {
+        eprintln!("ig-prep: {MATCH_CONFLICT}");
         std::process::exit(2);
     }
     if pick && (check || dry || variants) {
@@ -251,6 +266,7 @@ fn main() {
         quality,
         chroma,
         dither,
+        match_tables,
         dry,
         pad,
         out_dir: out_dir.clone(),
@@ -345,6 +361,20 @@ fn run_simulate(args: &[String]) -> i32 {
         }
     }
     if failed { 1 } else { 0 }
+}
+
+/// Both doors refuse these rather than drop them: a matched encode has no
+/// quality setting, no chroma choice and no noise.
+pub const MATCH_CONFLICT: &str = "--match encodes on the servers' tables at 4:4:4; it cannot combine with -q, a chroma flag or --dither";
+
+/// The one encode both doors use, so a matched upload is a matched upload
+/// whichever way it was asked for.
+pub fn encode_with(o: &Opts, img: &image::Rgb) -> Result<Vec<u8>, String> {
+    if o.match_tables {
+        encode::jpeg_match(img)
+    } else {
+        encode::jpeg(img, o.quality, o.chroma, o.dither)
+    }
 }
 
 /// Convert a batch across the available cores, in input order.
@@ -508,6 +538,8 @@ pub struct Opts {
     pub quality: u8,
     pub chroma: Chroma,
     pub dither: bool,
+    /// Encode on the servers' measured tables instead of ZenJPEG's.
+    pub match_tables: bool,
     pub dry: bool,
     pad: [u8; 3],
     pub out_dir: PathBuf,
@@ -524,9 +556,20 @@ impl Opts {
             quality: encode::DEFAULT_QUALITY,
             chroma: Chroma::Full,
             dither: false,
+            match_tables: false,
             dry: false,
             pad: [255, 255, 255],
             out_dir: PathBuf::from("ig"),
+        }
+    }
+
+    /// What the report says the encode was: the chroma mode, or the servers'
+    /// tables when those replace it.
+    pub fn encode_label(&self) -> &'static str {
+        if self.match_tables {
+            "servers' tables"
+        } else {
+            self.chroma.label()
         }
     }
 
@@ -627,7 +670,7 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         outside_band: plan.outside_band,
         output: None,
         bytes: None,
-        chroma: o.chroma.label(),
+        chroma: o.encode_label(),
         error: None,
         note,
     };
@@ -639,7 +682,7 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         Ok(img) => img,
         Err(e) => return Report::failed(path, report.name, e),
     };
-    let bytes = match encode::jpeg(&final_img, o.quality, o.chroma, o.dither) {
+    let bytes = match encode_with(o, &final_img) {
         Ok(b) => b,
         Err(e) => return Report::failed(path, report.name, e),
     };
