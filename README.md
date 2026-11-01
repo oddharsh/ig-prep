@@ -83,6 +83,47 @@ itself after the last export or a quit; a browser that refuses says so on the
 page instead. Leave the framing untouched in the app; any adjustment there
 reintroduces the resample.
 
+## Lend an export its RAW's detail
+
+A photograph smaller than the delivery width, such as an edit exported at
+2048, can take the detail it lacks from its RAW. ig-prep looks for a RAW with
+the same stem (RAF, DNG, ARW, CR2, CR3, NEF and the rest the macOS RAW engine
+reads) in the photograph's folder, then in each `--raw` folder:
+
+```sh
+ig-prep --raw /Volumes/CARD/DCIM/100_FUJI -o ig ~/Pictures/exports
+```
+
+The photograph stays the authority on the look. A cubic fitted on thumbnails
+maps the RAW's rendering onto the photograph's colour. The photograph is
+enlarged whole, and the mapped RAW adds only detail above the photograph's
+sample rate, tile by tile, in proportion to how well the RAW's next octave
+down agrees with the photograph's. Each pixel stays inside the photograph's
+local range. A camera file that already covers the width is delivered byte for
+byte as before, and its RAW is never decoded, because Apple's RAW render
+carries a fifth of a Fujifilm HIF's fine-detail energy and would only swap
+the camera's sharpening for its own.
+
+In November 2026, five X-T50 HIFs were exported at 2048, rebuilt at 3072 from
+their RAFs, and scored against each HIF's own 3072 output. Scores are
+SSIMULACRA2 / Butteraugli max norm, from fast-ssim2 0.9.0 and imazen's
+butteraugli 0.9.3:
+
+| Film simulation | Enlarged    | With the RAW |
+| --------------- | ----------- | ------------ |
+| Nostalgic Neg   | 74.9 / 4.33 | 77.6 / 3.15  |
+| Nostalgic Neg   | 76.1 / 2.64 | 76.4 / 2.55  |
+| Classic Chrome  | 83.5 / 3.17 | 83.5 / 2.36  |
+| Provia          | 66.7 / 4.34 | 75.9 / 4.82  |
+| Eterna          | 80.6 / 3.47 | 79.5 / 4.34  |
+
+Eterna loses because its glitter comes out of Apple's demosaic as different
+sparkles, so the RAW is worth a try on an export and worth a look after. A RAW
+is refused when its capture time, its frame shape or its fine structure
+disagrees with the photograph's, so a cropped edit is delivered from the
+export alone, and the line says why. `--no-raw` turns the search off.
+`--pick`, `--variants` and `diagnose` do not use RAWs yet.
+
 ## JPEG encoder
 
 The encoder is **ZenJPEG 0.8.4**, using the site's JPEG stack with a

@@ -13,6 +13,7 @@ mod heif;
 mod image;
 mod mcp;
 mod pick;
+mod raw;
 mod simulate;
 
 use encode::Chroma;
@@ -50,6 +51,18 @@ OPTIONS
                        about half the bytes, faster, and slightly ahead of q99
                        after the servers in local models. Cannot combine with
                        -q, the chroma flags or --dither.
+    --raw <dir>        also look in <dir> for each photograph's RAW (same
+                       stem, any RAW extension). Repeatable. Its own folder
+                       is always searched first.
+    --no-raw           never use a RAW
+
+RAW
+    A photograph smaller than the delivery width, such as an edit exported
+    at 2048, takes the detail it lacks from its RAW: the photograph keeps
+    every frequency it holds and the RAW, mapped onto its look, fills in
+    above them. A camera file that already covers the width is delivered as
+    before and its RAW is never decoded. A RAW is refused when its capture
+    time, its frame or its structure disagrees with the photograph's.
     --variants         write eight variants (1080/1440, q95/99, 444/420),
                        references and a manifest to a NEW --out directory;
                        use --crop or --pad for out-of-band sources
@@ -161,6 +174,8 @@ fn main() {
     let mut match_tables = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
+    let mut raw_dirs = Vec::new();
+    let mut no_raw = false;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -187,6 +202,18 @@ fn main() {
             "-w" | "--width" => width = args.next().and_then(|v| v.parse().ok()).unwrap_or(width),
             "-q" => quality = args.next().and_then(|v| v.parse().ok()).unwrap_or(quality),
             "-o" | "--out" => out_dir = args.next().map(PathBuf::from).unwrap_or(out_dir),
+            "--no-raw" => no_raw = true,
+            "--raw" => match args.next() {
+                Some(d) if Path::new(&d).is_dir() => raw_dirs.push(PathBuf::from(d)),
+                Some(d) => {
+                    eprintln!("ig-prep: --raw needs a directory, got {d}");
+                    std::process::exit(2);
+                }
+                None => {
+                    eprintln!("ig-prep: --raw needs a directory");
+                    std::process::exit(2);
+                }
+            },
             "--pad-color" => {
                 if let Some(h) = args.next() {
                     let h = h.trim_start_matches('#');
@@ -237,6 +264,12 @@ fn main() {
         eprintln!("ig-prep: {MATCH_CONFLICT}");
         std::process::exit(2);
     }
+    if !raw_dirs.is_empty() && (no_raw || pick || variants || check) {
+        eprintln!(
+            "ig-prep: --raw applies to an ordinary conversion; it cannot combine with --no-raw, --pick, --variants or --check"
+        );
+        std::process::exit(2);
+    }
     if pick && (check || dry || variants) {
         eprintln!(
             "ig-prep: --pick chooses the framing interactively; it cannot combine with --check, --dry-run or --variants"
@@ -270,6 +303,11 @@ fn main() {
         dry,
         pad,
         out_dir: out_dir.clone(),
+        raw: if no_raw {
+            Raw::Off
+        } else {
+            Raw::Search(raw_dirs)
+        },
     };
 
     if pick {
@@ -543,6 +581,16 @@ pub struct Opts {
     pub dry: bool,
     pad: [u8; 3],
     pub out_dir: PathBuf,
+    pub raw: Raw,
+}
+
+/// Whether a camera RAW may lend a photograph the detail it lacks at the
+/// delivery size.
+#[derive(Clone)]
+pub enum Raw {
+    Off,
+    /// Look beside each photograph, then in these folders.
+    Search(Vec<PathBuf>),
 }
 
 impl Opts {
@@ -560,6 +608,7 @@ impl Opts {
             dry: false,
             pad: [255, 255, 255],
             out_dir: PathBuf::from("ig"),
+            raw: Raw::Search(Vec::new()),
         }
     }
 
@@ -606,6 +655,9 @@ pub struct Report {
     pub chroma: &'static str,
     pub error: Option<String>,
     note: &'static str,
+    /// What a RAW found beside the photograph did, or why it did nothing.
+    /// Absent when no RAW was found or the search was off.
+    pub raw: Option<String>,
 }
 
 impl Report {
@@ -621,6 +673,7 @@ impl Report {
             chroma: "",
             error: Some(e),
             note: "",
+            raw: None,
         }
     }
 
@@ -632,7 +685,10 @@ impl Report {
         }
         let (fw, fh) = self.from.unwrap_or((0, 0));
         let (tw, th) = self.to.unwrap_or((0, 0));
-        let summary = format!("{}: {fw}x{fh} -> {tw}x{th}{}", self.name, self.note);
+        let mut summary = format!("{}: {fw}x{fh} -> {tw}x{th}{}", self.name, self.note);
+        if let Some(raw) = &self.raw {
+            summary.push_str(&format!(" [{raw}]"));
+        }
         match self.bytes {
             Some(b) => format!("{summary}  {} {} KB", self.chroma, b / 1024),
             None => summary,
@@ -652,7 +708,16 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         Err(e) => return Report::failed(path, name, e),
     };
 
-    let plan = geometry::plan(img.w, img.h, o.fit, o.gravity, o.width);
+    let own = geometry::plan(img.w, img.h, o.fit, o.gravity, o.width);
+    let raw_path = match &o.raw {
+        Raw::Off => None,
+        Raw::Search(dirs) => raw::find(path, dirs),
+    };
+    let (lent, raw_note) = match &raw_path {
+        Some(rp) => lend(&img, &own, path, rp, o),
+        None => (None, None),
+    };
+    let plan = lent.as_ref().map_or(own, |l| l.plan);
     let note = if plan.outside_band {
         match o.fit {
             Fit::Full => " (outside Instagram's band, crop it in the app)",
@@ -673,12 +738,18 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         chroma: o.encode_label(),
         error: None,
         note,
+        raw: raw_note,
     };
     if o.dry {
         return report;
     }
 
-    let final_img = match render(&img, &plan, o.pad) {
+    let rendered = match &lent {
+        Some(l) => raw::merge(&img, &l.img, &l.look, plan.crop, plan.scale)
+            .map(|scaled| padded(scaled, &plan, o.pad)),
+        None => render(&img, &plan, o.pad),
+    };
+    let final_img = match rendered {
         Ok(img) => img,
         Err(e) => return Report::failed(path, report.name, e),
     };
@@ -698,6 +769,46 @@ pub fn one(path: &Path, o: &Opts) -> Report {
         }
         Err(e) => Report::failed(path, report.name, format!("{}: {e}", dest.display())),
     }
+}
+
+/// A RAW that passed every check, and the plan its larger frame allows.
+struct Lent {
+    img: image::Rgb,
+    look: raw::Look,
+    plan: geometry::Plan,
+}
+
+/// Decide whether the RAW at `rp` lends the photograph detail, and say why
+/// in the report either way. The checks run cheapest first, so a full-size
+/// camera file never pays for decoding its RAW.
+fn lend(
+    img: &image::Rgb,
+    own: &geometry::Plan,
+    path: &Path,
+    rp: &Path,
+    o: &Opts,
+) -> (Option<Lent>, Option<String>) {
+    let rname = rp.file_name().unwrap_or_default().to_string_lossy();
+    // A photograph that is downscaled already holds every frequency the
+    // output can show, so the RAW would only replace the camera's detail
+    // with the RAW engine's.
+    if own.scale.0 < own.crop.2 {
+        return (None, Some(format!("{rname} not needed")));
+    }
+    if let Some(why) = raw::mismatch(path, rp) {
+        return (None, Some(format!("{rname} not used: {why}")));
+    }
+    let paired = load_oriented(rp).and_then(|r| raw::pair(img, &r).map(|look| (r, look)));
+    let (r, look) = match paired {
+        Ok(p) => p,
+        Err(why) => return (None, Some(format!("{rname} not used: {why}"))),
+    };
+    let plan = geometry::plan(r.w, r.h, o.fit, o.gravity, o.width);
+    if plan.scale.0 <= own.scale.0 {
+        return (None, Some(format!("{rname} not needed")));
+    }
+    let note = format!("detail above {}x{} from {rname}", own.scale.0, own.scale.1);
+    (Some(Lent { img: r, look, plan }), Some(note))
 }
 
 fn load_oriented(path: &Path) -> Result<image::Rgb, String> {
@@ -745,7 +856,11 @@ fn render(img: &image::Rgb, plan: &geometry::Plan, pad: [u8; 3]) -> Result<image
         &cropped
     };
     let scaled = image::resize(src, plan.scale.0, plan.scale.1)?;
-    Ok(if plan.canvas != plan.scale {
+    Ok(padded(scaled, plan, pad))
+}
+
+fn padded(scaled: image::Rgb, plan: &geometry::Plan, pad: [u8; 3]) -> image::Rgb {
+    if plan.canvas != plan.scale {
         scaled.pad_onto(
             plan.canvas.0,
             plan.canvas.1,
@@ -755,7 +870,7 @@ fn render(img: &image::Rgb, plan: &geometry::Plan, pad: [u8; 3]) -> Result<image
         )
     } else {
         scaled
-    })
+    }
 }
 
 const EXTS: [&str; 8] = ["jpg", "jpeg", "heif", "heic", "hif", "jxl", "png", "avif"];

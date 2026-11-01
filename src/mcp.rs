@@ -30,7 +30,7 @@
 
 use crate::encode::Chroma;
 use crate::geometry::{Fit, Gravity};
-use crate::{Agreement, Opts, Report};
+use crate::{Agreement, Opts, Raw, Report};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -327,6 +327,27 @@ fn tools() -> Value {
     let mut plan_props = Map::new();
     plan_props.insert("paths".into(), paths_schema("inspect"));
     geometry_props(&mut plan_props);
+    plan_props.insert(
+        "raw".into(),
+        json!({
+            "type": "boolean",
+            "default": true,
+            "description": "Let a camera RAW with the photograph's stem lend it the detail it \
+                            lacks when it is smaller than the delivery width, such as an edit \
+                            exported at 2048. The photograph keeps every frequency it holds. \
+                            A camera file that covers the width is unaffected. A RAW whose \
+                            capture time, frame or structure disagrees is refused.",
+        }),
+    );
+    plan_props.insert(
+        "raw_dirs".into(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Folders to search for RAWs after each photograph's own, such as \
+                            a memory card or a RAW archive. Each must be under the root.",
+        }),
+    );
 
     let mut convert_props = plan_props.clone();
     convert_props.insert(
@@ -457,6 +478,11 @@ fn file_props(converted: bool) -> Value {
                             Instagram will crop it unless fit=crop or fit=pad handled it here.",
         },
         "error": { "type": "string", "description": "Present only if this file failed." },
+        "raw": {
+            "type": "string",
+            "description": "What a RAW found beside the photograph did, or why it did nothing. \
+                            Absent when none was found.",
+        },
     });
     if converted {
         p["output"] = json!({ "type": "string", "description": "Path of the written JPEG." });
@@ -555,6 +581,10 @@ fn call(id: Value, params: &Value, root: Option<&Path>) -> Value {
                 Err(e) => return tool_error(id, e),
             };
             opts.dry = true;
+            opts.raw = match raw_opts(&args, root) {
+                Ok(r) => r,
+                Err(e) => return tool_error(id, e),
+            };
             let reports = crate::run_all(&files, &opts);
             let failed = reports.iter().filter(|r| r.error.is_some()).count();
             let mut text = lines(&reports);
@@ -690,6 +720,9 @@ fn report_json_plan(r: &Report) -> Value {
     if let Some(e) = &r.error {
         m["error"] = json!(e);
     }
+    if let Some(raw) = &r.raw {
+        m["raw"] = json!(raw);
+    }
     m
 }
 
@@ -770,7 +803,37 @@ fn convert_opts(args: &Value, root: Option<&Path>) -> Result<Opts, String> {
     }
     let dir = args.get("out_dir").and_then(Value::as_str).unwrap_or("ig");
     o.out_dir = under_root(Path::new(dir), root, false)?;
+    o.raw = raw_opts(args, root)?;
     Ok(o)
+}
+
+fn raw_opts(args: &Value, root: Option<&Path>) -> Result<Raw, String> {
+    let on = match args.get("raw") {
+        None => true,
+        Some(v) => v.as_bool().ok_or("raw must be a boolean")?,
+    };
+    let dirs = match args.get("raw_dirs") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()
+            .ok_or("raw_dirs must be an array of strings")?
+            .iter()
+            .map(|d| {
+                let d = d.as_str().ok_or("raw_dirs must be an array of strings")?;
+                let dir = under_root(Path::new(d), root, true)?;
+                if dir.is_dir() {
+                    Ok(dir)
+                } else {
+                    Err(format!("{} is not a directory", dir.display()))
+                }
+            })
+            .collect::<Result<_, String>>()?,
+    };
+    match (on, dirs.is_empty()) {
+        (true, _) => Ok(Raw::Search(dirs)),
+        (false, true) => Ok(Raw::Off),
+        (false, false) => Err("raw_dirs names folders to search, so it needs raw left on".into()),
+    }
 }
 
 fn inputs(args: &Value, root: Option<&Path>) -> Result<(Vec<PathBuf>, usize), String> {
@@ -1041,6 +1104,30 @@ mod tests {
         assert!(convert_opts(&json!({ "chroma": "411" }), None).is_err());
         assert!(convert_opts(&json!({ "pad_color": "xyzxyz" }), None).is_err());
         assert!(convert_opts(&json!({ "pad_color": "fff" }), None).is_err());
+    }
+
+    /// A RAW folder is read from, so `--root` bounds it like every other path.
+    #[test]
+    fn raw_folders_stay_under_the_root_and_need_raw_left_on() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let card = root.join("card");
+        std::fs::create_dir(&card).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        assert!(matches!(raw_opts(&json!({}), Some(&root)), Ok(Raw::Search(d)) if d.is_empty()));
+        assert!(matches!(
+            raw_opts(&json!({ "raw": false }), Some(&root)),
+            Ok(Raw::Off)
+        ));
+        assert!(matches!(
+            raw_opts(&json!({ "raw_dirs": [card] }), Some(&root)),
+            Ok(Raw::Search(d)) if d == vec![card.clone()]
+        ));
+        let escaped = raw_opts(&json!({ "raw_dirs": [outside.path()] }), Some(&root));
+        assert!(escaped.is_err_and(|e| e.contains("outside the root")));
+        assert!(raw_opts(&json!({ "raw": false, "raw_dirs": [card] }), Some(&root)).is_err());
+        assert!(raw_opts(&json!({ "raw": "yes" }), None).is_err());
     }
 
     /// `match` replaces quality, chroma and dither, so naming any of them
