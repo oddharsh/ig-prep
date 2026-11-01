@@ -17,6 +17,15 @@ pub struct Decoded {
 }
 
 pub fn open(path: &Path) -> Result<Decoded, String> {
+    // A RAW goes by extension: DNG, NEF and ARW are TIFF inside and CR3 is
+    // ISO BMFF, so their magic would send them down the wrong branch. sips
+    // renders them through the macOS RAW engine and leaves orientation alone.
+    if crate::raw::is_raw(path) {
+        return Ok(Decoded {
+            img: via_converter(path, false)?,
+            orientation_applied: false,
+        });
+    }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let (img, orientation_applied) = if bytes.starts_with(&[0xff, 0xd8]) {
         (jpeg(&bytes)?, false)

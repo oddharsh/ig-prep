@@ -80,11 +80,18 @@ impl Rgb {
 
 /// Lanczos3 operates directly on linear-light samples, without an intermediate copy.
 pub fn resize(src: &Rgb, w: u32, h: u32) -> Result<Rgb, String> {
-    use fast_image_resize::images::{Image, ImageRef};
-    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
     if (src.w, src.h) == (w, h) {
         return Ok(Rgb::new(w, h, src.px.clone()));
     }
+    resize_window(src, [0.0, 0.0, src.w as f64, src.h as f64], w, h)
+}
+
+/// Resize the window `[left, top, width, height]` of `src`, in fractional
+/// source pixels, so a window drawn on one frame lands exactly on another of
+/// a different size instead of rounding to the nearer whole pixel.
+pub fn resize_window(src: &Rgb, window: [f64; 4], w: u32, h: u32) -> Result<Rgb, String> {
+    use fast_image_resize::images::{Image, ImageRef};
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
     let source = ImageRef::new(
         src.w,
         src.h,
@@ -104,7 +111,9 @@ pub fn resize(src: &Rgb, w: u32, h: u32) -> Result<Rgb, String> {
         .resize(
             &source,
             &mut target,
-            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)),
+            &ResizeOptions::new()
+                .resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3))
+                .crop(window[0], window[1], window[2], window[3]),
         )
         .map_err(|e| format!("resize: {e}"))?;
     Ok(Rgb::new(w, h, pixels))
