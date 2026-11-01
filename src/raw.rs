@@ -154,8 +154,10 @@ fn structure(a: &Rgb, b: &Rgb) -> Result<f32, String> {
         let luma = |p: &[f32]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
         let d: Vec<f32> = img
             .px
-            .chunks_exact(3)
-            .zip(blur.px.chunks_exact(3))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(blur.px.as_chunks::<3>().0.iter())
             .map(|(p, q)| luma(p) - luma(q))
             .collect();
         let n = d.len() as f32;
@@ -205,7 +207,13 @@ impl Look {
     fn fit(raw: &Rgb, photo: &Rgb) -> Look {
         let mut ata = [[0.0f64; 20]; 20];
         let mut atb = [[0.0f64; 3]; 20];
-        for (p, q) in raw.px.chunks_exact(3).zip(photo.px.chunks_exact(3)) {
+        for (p, q) in raw
+            .px
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(photo.px.as_chunks::<3>().0.iter())
+        {
             let t = terms([p[0], p[1], p[2]].map(|c| c.clamp(0.0, 1.0) as f64));
             for i in 0..20 {
                 for j in 0..20 {
@@ -230,7 +238,7 @@ impl Look {
 
     fn apply(&self, img: &Rgb) -> Rgb {
         let mut px = Vec::with_capacity(img.px.len());
-        for p in img.px.chunks_exact(3) {
+        for p in img.px.as_chunks::<3>().0.iter() {
             let t = terms([p[0], p[1], p[2]].map(|c| c.clamp(0.0, 1.0) as f64));
             for c in 0..3 {
                 px.push(self.0[c].iter().zip(&t).map(|(k, v)| k * v).sum::<f64>() as f32);
@@ -464,9 +472,13 @@ mod tests {
             960,
             640,
             raw.px
-                .chunks_exact(960 * 3)
+                .as_chunks::<{ 960 * 3 }>()
+                .0
+                .iter()
                 .flat_map(|row| {
-                    row.chunks_exact(3)
+                    row.as_chunks::<3>()
+                        .0
+                        .iter()
                         .rev()
                         .flatten()
                         .copied()
@@ -492,7 +504,9 @@ mod tests {
             64,
             64,
             raw.px
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|p| {
                     let [r, g, b] = [p[0], p[1], p[2]];
                     [

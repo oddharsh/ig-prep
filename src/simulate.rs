@@ -161,7 +161,12 @@ pub fn encode(w: u32, h: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
 fn ycbcr_box420(w: u32, h: u32, rgb: &[u8]) -> Vec<u8> {
     let (w, h) = (w as usize, h as usize);
     let mut ycc = vec![0u8; w * h * 3];
-    for (p, o) in rgb.chunks_exact(3).zip(ycc.chunks_exact_mut(3)) {
+    for (p, o) in rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(ycc.as_chunks_mut::<3>().0)
+    {
         let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
         let to_u8 = |v: f32| v.round().clamp(0.0, 255.0) as u8;
         o[0] = to_u8(0.299 * r + 0.587 * g + 0.114 * b);
