@@ -83,6 +83,14 @@ itself after the last export or a quit; a browser that refuses says so on the
 page instead. Leave the framing untouched in the app; any adjustment there
 reintroduces the resample.
 
+A window decided elsewhere, such as one from a contact sheet of candidate
+crops, skips the browser. `--window` takes it in oriented source pixels and
+exports one photograph through the same path:
+
+```sh
+ig-prep --window 0,811,7728,4046 -o ig XT500965.HIF   # 1.91:1, 3072x1608
+```
+
 ## Lend an export its RAW's detail
 
 A photograph smaller than the delivery width, such as an edit exported at

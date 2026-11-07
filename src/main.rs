@@ -38,6 +38,9 @@ FIT
                   at a time. The export is a whole-pixel, in-band window at
                   the target width, so the app has nothing to resample. The
                   fit flags are ignored; -o, -w, -q and chroma apply.
+    --window <x,y,w,h>   export one photograph through the window --pick
+                  would post: whole oriented pixels, inside the band, at
+                  the target width. Repeats a choice without the browser.
 
 OPTIONS
     -w, --width <px>   target width (default 3072)
@@ -171,6 +174,7 @@ fn main() {
     let mut dither = false;
     let mut variants = false;
     let mut pick = false;
+    let mut window = None;
     let mut match_tables = false;
     let mut out_dir = PathBuf::from("ig");
     let mut pad = [255u8, 255, 255];
@@ -191,6 +195,13 @@ fn main() {
             "--dither" => dither = true,
             "--variants" => variants = true,
             "--pick" => pick = true,
+            "--window" => match args.next().as_deref().and_then(parse_window) {
+                Some(w) => window = Some(w),
+                None => {
+                    eprintln!("ig-prep: --window needs x,y,width,height in oriented source pixels");
+                    std::process::exit(2);
+                }
+            },
             "--match" => match_tables = true,
             "--gravity" => {
                 gravity = match args.next().as_deref() {
@@ -264,9 +275,9 @@ fn main() {
         eprintln!("ig-prep: {MATCH_CONFLICT}");
         std::process::exit(2);
     }
-    if !raw_dirs.is_empty() && (no_raw || pick || variants || check) {
+    if !raw_dirs.is_empty() && (no_raw || pick || variants || check || window.is_some()) {
         eprintln!(
-            "ig-prep: --raw applies to an ordinary conversion; it cannot combine with --no-raw, --pick, --variants or --check"
+            "ig-prep: --raw applies to an ordinary conversion; it cannot combine with --no-raw, --pick, --window, --variants or --check"
         );
         std::process::exit(2);
     }
@@ -276,10 +287,23 @@ fn main() {
         );
         std::process::exit(2);
     }
+    if window.is_some() && (pick || check || dry || variants) {
+        eprintln!(
+            "ig-prep: --window frames one photograph; it cannot combine with --pick, --check, --dry-run or --variants"
+        );
+        std::process::exit(2);
+    }
     let files = expand(&paths);
     if files.is_empty() {
         eprintln!("ig-prep: no readable images");
         std::process::exit(1);
+    }
+    if window.is_some() && files.len() != 1 {
+        eprintln!(
+            "ig-prep: --window frames one photograph; {} were given",
+            files.len()
+        );
+        std::process::exit(2);
     }
     if check {
         std::process::exit(run_check(&files));
@@ -312,6 +336,17 @@ fn main() {
 
     if pick {
         std::process::exit(pick::run(&files, &opts));
+    }
+    if let Some(window) = window {
+        match load_oriented(&files[0]).and_then(|img| pick::export(&img, &files[0], window, &opts))
+        {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("ig-prep: {}: {e}", files[0].display());
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     if variants {
         match comparison::generate(&files, &opts) {
@@ -811,6 +846,19 @@ fn lend(
     (Some(Lent { img: r, look, plan }), Some(note))
 }
 
+/// `--window`, as `x,y,w,h` in whole oriented pixels. The frame and the band
+/// are checked later by `geometry::plan_window`, once the image is decoded.
+fn parse_window(value: &str) -> Option<(u32, u32, u32, u32)> {
+    let parts: Vec<u32> = value
+        .split(',')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    match parts[..] {
+        [x, y, w, h] => Some((x, y, w, h)),
+        _ => None,
+    }
+}
+
 fn load_oriented(path: &Path) -> Result<image::Rgb, String> {
     // Orientation comes from the metadata reader rather than from the decoder,
     // because a HEIF's rotation lives in its EXIF and sips does not apply it.
@@ -898,4 +946,18 @@ pub fn expand(paths: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_window;
+
+    #[test]
+    fn a_window_is_four_whole_numbers() {
+        assert_eq!(parse_window("0,541,5152,6869"), Some((0, 541, 5152, 6869)));
+        assert_eq!(parse_window("0,541,5152"), None);
+        assert_eq!(parse_window("0,541,5152,6869,1"), None);
+        assert_eq!(parse_window("0,541.5,5152,6869"), None);
+        assert_eq!(parse_window("-1,541,5152,6869"), None);
+    }
 }

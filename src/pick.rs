@@ -146,7 +146,7 @@ fn session(listener: &TcpListener, files: &[PathBuf], opts: &Opts) -> Result<Out
                 }
                 exports.push_back(Export {
                     path: path.clone(),
-                    handle: std::thread::spawn(move || export(&frame, &path, window, &opts)),
+                    handle: std::thread::spawn(move || export(&frame.img, &path, window, &opts)),
                 });
                 i += 1;
                 let last = i >= files.len();
@@ -305,14 +305,14 @@ fn parse_window(body: &[u8]) -> Result<(u32, u32, u32, u32), String> {
     Ok((n("x")?, n("y")?, n("w")?, n("h")?))
 }
 
-fn export(
-    cur: &Current,
+pub fn export(
+    img: &image::Rgb,
     path: &Path,
     window: (u32, u32, u32, u32),
     opts: &Opts,
 ) -> Result<String, String> {
-    let plan = geometry::plan_window(cur.img.w, cur.img.h, window, opts.width)?;
-    let final_img = crate::render(&cur.img, &plan, opts.pad)?;
+    let plan = geometry::plan_window(img.w, img.h, window, opts.width)?;
+    let final_img = crate::render(img, &plan, opts.pad)?;
     let bytes = crate::encode_with(opts, &final_img)?;
     let dest = opts.out_dir.join(format!(
         "{}.jpg",
@@ -322,8 +322,8 @@ fn export(
     Ok(format!(
         "{}: {}x{} -> {}x{} (window {}x{} at {},{})  {} {} KB",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        cur.img.w,
-        cur.img.h,
+        img.w,
+        img.h,
         plan.scale.0,
         plan.scale.1,
         window.2,
